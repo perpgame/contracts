@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+import {Script, console2} from "forge-std/Script.sol";
+import {AgentTreasury} from "../src/AgentTreasury.sol";
+import {AgentCurve} from "../src/AgentCurve.sol";
+
+/// Deploys the MVP agent — Vol Vampire ($FANG) — to HyperEVM mainnet.
+///
+/// Two contracts, deployed in one broadcast and linked atomically:
+///   1. AgentTreasury  — LT custodian, rebalancer-driven
+///   2. AgentCurve     — AGENT ERC-20 + NAV-anchored buy/sell market
+///   3. treasury.setCurve(curve)  — wires them together (creator-only, one-shot)
+///
+/// Required env vars:
+///   DEPLOYER_PK   — private key for the broadcast (also pays gas)
+///   REBALANCER    — address allowed to call treasury.rebalance()
+///   CREATOR       — agent creator address; also the account that calls
+///                   setCurve(curve), so it MUST equal the DEPLOYER address
+///                   (the broadcast signs as the deployer)
+///
+/// Optional env vars:
+///   AGENT_NAME              — defaults to "Vol Vampire"
+///   AGENT_TICKER            — defaults to "FANG"
+///   PREMIUM_CAP_SUPPLY_WAD  — supply at which premium multiplier caps (default 30_000e18)
+///   EXTRA_PREMIUM_WAD       — max premium add-on (default 0.3e18 = +30%)
+///
+/// Usage:
+///   forge script script/DeployVolVampire.s.sol:DeployVolVampire \
+///     --rpc-url $HYPEREVM_RPC_URL --broadcast
+contract DeployVolVampire is Script {
+    address constant USDC = 0xb88339CB7199b77E23DB6E890353E22632Ba630f;
+
+    // 6-LT universe locked in project_mvp_decisions.md.
+    address constant HYPE5L = 0x18b8539261cF9e760E7fEc4a8a73c50F0AE7baBE;
+    address constant HYPE3L = 0x9A51b0DC3545cb8e9b0382b42c91F9e39a92eFD6;
+    address constant BTC5L = 0xBe4e97a8FceeB1b82D64349FbA6Ff29B65Ad3B7d;
+    address constant BTC3L = 0x7B430c5842ce7dBa29b910c018369FA2Fa0ac2e3;
+    address constant ETH5L = 0x6ce8B325252805d2b4b5A6d03eA197d95E0dd582;
+    address constant ETH3L = 0x6019caD7d5A8D4d90eCed36576d23F6198aed156;
+
+    function run() external returns (AgentTreasury treasury, AgentCurve curve) {
+        uint256 deployerPk = vm.envUint("DEPLOYER_PK");
+        address rebalancer = vm.envAddress("REBALANCER");
+        address creator = vm.envAddress("CREATOR");
+        string memory agentName = vm.envOr("AGENT_NAME", string("Vol Vampire"));
+        string memory agentTicker = vm.envOr("AGENT_TICKER", string("FANG"));
+        uint256 premiumCapSupply = vm.envOr("PREMIUM_CAP_SUPPLY_WAD", uint256(30_000 * 1e18));
+        // 0.3e18 = +30% max premium. Late buyer pays 1.3× NAV at the cap.
+        uint256 extraPremium = vm.envOr("EXTRA_PREMIUM_WAD", uint256(0.3e18));
+
+        // Initial weights — defensive HYPE5L core per the thesis.
+        AgentTreasury.AssetSpec[] memory portfolio = new AgentTreasury.AssetSpec[](6);
+        portfolio[0] = AgentTreasury.AssetSpec({symbol: "HYPE5L", lt: HYPE5L, bps: 3000});
+        portfolio[1] = AgentTreasury.AssetSpec({symbol: "HYPE3L", lt: HYPE3L, bps: 1500});
+        portfolio[2] = AgentTreasury.AssetSpec({symbol: "BTC5L", lt: BTC5L, bps: 2000});
+        portfolio[3] = AgentTreasury.AssetSpec({symbol: "BTC3L", lt: BTC3L, bps: 1000});
+        portfolio[4] = AgentTreasury.AssetSpec({symbol: "ETH5L", lt: ETH5L, bps: 1500});
+        portfolio[5] = AgentTreasury.AssetSpec({symbol: "ETH3L", lt: ETH3L, bps: 1000});
+        // sum = 10000 ✓
+
+        console2.log("Deploying", agentName, agentTicker);
+        console2.log("  rebalancer:", rebalancer);
+        console2.log("  creator:   ", creator);
+        console2.log("  USDC:      ", USDC);
+        console2.log("  premium cap supply (WAD):", premiumCapSupply);
+        console2.log("  extra premium (WAD):     ", extraPremium);
+
+        vm.startBroadcast(deployerPk);
+
+        string memory initialReasoningCid =
+            vm.envOr("INITIAL_REASONING_CID", string("ipfs://genesis-vol-vampire"));
+        // Bounce's LeveragedTokenHelper on HyperEVM mainnet.
+        address ltHelper = 0x69028FFb4e18c068fC65917ca7152c29e4B38B01;
+        treasury = new AgentTreasury(USDC, rebalancer, creator, ltHelper, portfolio, initialReasoningCid);
+
+        curve = new AgentCurve(agentName, agentTicker, address(treasury), premiumCapSupply, extraPremium);
+
+        // Link them. setCurve is creator-only; the broadcast key must equal
+        // the CREATOR env var address.
+        treasury.setCurve(address(curve));
+
+        vm.stopBroadcast();
+
+        console2.log("AgentTreasury deployed at:", address(treasury));
+        console2.log("AgentCurve    deployed at:", address(curve));
+    }
+}

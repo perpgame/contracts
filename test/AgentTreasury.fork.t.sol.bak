@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+import {Test, console2} from "forge-std/Test.sol";
+import {AgentTreasury} from "../src/AgentTreasury.sol";
+import {AgentCurve} from "../src/AgentCurve.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+/// Fork tests against HyperEVM mainnet.
+///
+/// Limitation (recorded as a memory): HyperEVM has chain-specific precompiles
+/// (e.g. 0x...0801) that Bounce's HyperliquidHandler calls inside LT mint/
+/// redeem paths. Foundry forks lack those precompiles, so any call that
+/// reaches HyperliquidHandler reverts. We can fork-test construction, view
+/// methods, balanceOf on the real LT proxies, and access control. Full
+/// mint/redeem behavior is covered by unit tests against MockBounceLT and by
+/// the mainnet deploy itself.
+///
+/// Override RPC via HYPEREVM_RPC_URL; default https://hyperliquid.drpc.org.
+/// Addresses from the bouncetech/contracts npm v0 and the indexer at
+/// https://indexing.bounce.tech/leveraged-tokens (snapshot 2026-05-19).
+contract AgentTreasuryForkTest is Test {
+    address constant USDC = 0xb88339CB7199b77E23DB6E890353E22632Ba630f;
+    address constant HYPE5L = 0x18b8539261cF9e760E7fEc4a8a73c50F0AE7baBE;
+    address constant BTC5L = 0xBe4e97a8FceeB1b82D64349FbA6Ff29B65Ad3B7d;
+    address constant LT_HELPER = 0x69028FFb4e18c068fC65917ca7152c29e4B38B01;
+
+    AgentTreasury treasury;
+    AgentCurve curve;
+    address creator = address(0xC0FFEE);
+    address rebalancer = address(0xBEEF);
+    address alice = address(0xA11CE);
+
+    uint256 constant PREMIUM_CAP_SUPPLY = 30_000 * 1e18;
+    uint256 constant EXTRA_PREMIUM = 2e18;
+
+    function setUp() public {
+        // Default to the official RPC; dRPC's free endpoint stopped serving
+        // eth_getBlockByNumber. Override via HYPEREVM_RPC_URL for archive use.
+        string memory rpc = vm.envOr("HYPEREVM_RPC_URL", string("https://rpc.hyperliquid.xyz/evm"));
+        vm.createSelectFork(rpc);
+
+        AgentTreasury.AssetSpec[] memory portfolio = new AgentTreasury.AssetSpec[](2);
+        portfolio[0] = AgentTreasury.AssetSpec({symbol: "HYPE5L", lt: HYPE5L, bps: 5000});
+        portfolio[1] = AgentTreasury.AssetSpec({symbol: "BTC5L", lt: BTC5L, bps: 5000});
+
+        treasury = new AgentTreasury(USDC, rebalancer, creator, LT_HELPER, portfolio, "ipfs://fork-test");
+        curve = new AgentCurve("Vol Vampire", "FANG", address(treasury), PREMIUM_CAP_SUPPLY, EXTRA_PREMIUM);
+        vm.prank(creator);
+        treasury.setCurve(address(curve));
+    }
+
+    function testFork_Constructor_AcceptsRealLtAddresses() public view {
+        assertEq(treasury.rebalancer(), rebalancer);
+        assertEq(treasury.CREATOR(), creator);
+        assertEq(address(treasury.USDC()), USDC);
+        assertEq(treasury.curve(), address(curve));
+    }
+
+    function testFork_CurveLinkedToTreasury() public view {
+        assertEq(address(curve.TREASURY()), address(treasury));
+        assertEq(address(curve.USDC()), USDC);
+        assertEq(curve.totalSupply(), 0);
+    }
+
+    function testFork_Nav_ZeroOnFreshTreasury() public view {
+        assertEq(treasury.nav(), 0);
+    }
+
+    function testFork_AssetCount_ReturnsUniverseSize() public view {
+        assertEq(treasury.assetCount(), 2);
+        assertEq(treasury.symbols(0), "HYPE5L");
+        assertEq(treasury.symbols(1), "BTC5L");
+        (address ltA, uint16 bpsA,) = treasury.assets("HYPE5L");
+        (address ltB, uint16 bpsB,) = treasury.assets("BTC5L");
+        assertEq(ltA, HYPE5L);
+        assertEq(ltB, BTC5L);
+        assertEq(bpsA, 5000);
+        assertEq(bpsB, 5000);
+    }
+
+    function testFork_RealLtBalanceOf_ReadsThroughProxy() public view {
+        assertEq(IERC20(HYPE5L).balanceOf(address(treasury)), 0);
+        assertEq(IERC20(BTC5L).balanceOf(address(treasury)), 0);
+    }
+
+    function testFork_RebalanceAccessControl() public {
+        AgentTreasury.AssetSpec[] memory portfolio = new AgentTreasury.AssetSpec[](2);
+        portfolio[0] = AgentTreasury.AssetSpec({symbol: "HYPE5L", lt: HYPE5L, bps: 4000});
+        portfolio[1] = AgentTreasury.AssetSpec({symbol: "BTC5L", lt: BTC5L, bps: 6000});
+
+        vm.expectRevert(AgentTreasury.NotRebalancer.selector);
+        vm.prank(alice);
+        treasury.setTargetPortfolio(portfolio, "ipfs://test");
+    }
+
+    function testFork_DeployUsdc_GatedToCurveOnly() public {
+        deal(USDC, alice, 100 * 1e6, true);
+        vm.startPrank(alice);
+        IERC20(USDC).approve(address(treasury), 100 * 1e6);
+        vm.expectRevert(AgentTreasury.NotCurve.selector);
+        treasury.deployUsdc(100 * 1e6, new uint256[](2));
+        vm.stopPrank();
+    }
+
+    function testFork_WithdrawLtsTo_GatedToCurveOnly() public {
+        vm.expectRevert(AgentTreasury.NotCurve.selector);
+        vm.prank(alice);
+        treasury.withdrawLtsTo(alice, 100, 1000, 0);
+    }
+
+    function testFork_SetRebalancerAccessControl() public {
+        address next = address(0xCAFE);
+        vm.expectRevert(AgentTreasury.NotRebalancer.selector);
+        vm.prank(alice);
+        treasury.setRebalancer(next);
+
+        vm.prank(rebalancer);
+        treasury.setRebalancer(next);
+        assertEq(treasury.rebalancer(), next);
+    }
+
+    /// Documents the precompile limitation. If this ever stops reverting,
+    /// either Foundry gained HyperEVM precompile support or Bounce removed
+    /// the HyperliquidHandler dependency.
+    function testFork_Buy_RevertsDueToPrecompileLimitation() public {
+        deal(USDC, alice, 100 * 1e6, true);
+        vm.startPrank(alice);
+        IERC20(USDC).approve(address(curve), 100 * 1e6);
+        vm.expectRevert();
+        curve.buy(100 * 1e6, 0, new uint256[](2), alice);
+        vm.stopPrank();
+    }
+}

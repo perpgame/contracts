@@ -1,0 +1,321 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+import {Test} from "forge-std/Test.sol";
+import {AgentTreasury} from "../src/AgentTreasury.sol";
+import {AgentCurve} from "../src/AgentCurve.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MockUSDC} from "./mocks/MockUSDC.sol";
+import {MockBounceLT} from "./mocks/MockBounceLT.sol";
+import {MockLeveragedTokenHelper} from "./mocks/MockLeveragedTokenHelper.sol";
+
+/// Property-based fuzz tests for AgentCurve. These invariants must hold for
+/// *any* valid input, not just the specific values worked out by hand in the
+/// unit tests — the off-by-1e18 we caught in `_quoteBuy` is exactly the class
+/// of bug these tests are designed to surface.
+///
+/// Each test runs 256 random inputs by default (foundry.toml fuzz config).
+contract AgentCurveFuzzTest is Test {
+    MockUSDC usdc;
+    MockBounceLT ltA;
+    MockBounceLT ltB;
+    MockLeveragedTokenHelper helper;
+    AgentTreasury treasury;
+    AgentCurve curve;
+
+    address creator = address(0xC0FFEE);
+    address rebalancer = address(0xBEEF);
+    address alice = address(0xA11CE);
+    address bob = address(0xB0B);
+
+    uint256 constant PREMIUM_CAP_SUPPLY = 30_000 * 1e18;
+    uint256 constant EXTRA_PREMIUM = 2e18;
+
+    function setUp() public {
+        usdc = new MockUSDC();
+        ltA = new MockBounceLT("HYPE 5x Long", "HYPE5L", address(usdc), "HYPE", 5, true, 1e18);
+        ltB = new MockBounceLT("BTC 5x Long", "BTC5L", address(usdc), "BTC", 5, true, 1e18);
+        helper = new MockLeveragedTokenHelper();
+
+        AgentTreasury.AssetSpec[] memory portfolio = new AgentTreasury.AssetSpec[](2);
+        portfolio[0] = AgentTreasury.AssetSpec({symbol: "HYPE5L", lt: address(ltA), bps: 5000});
+        portfolio[1] = AgentTreasury.AssetSpec({symbol: "BTC5L", lt: address(ltB), bps: 5000});
+        treasury = new AgentTreasury(address(usdc), rebalancer, creator, address(helper), portfolio, "ipfs://test");
+        curve = new AgentCurve("Vol Vampire", "FANG", address(treasury), PREMIUM_CAP_SUPPLY, EXTRA_PREMIUM);
+        vm.prank(creator);
+        treasury.setCurve(address(curve));
+
+        usdc.mint(alice, 1e30); // effectively infinite
+        usdc.mint(bob, 1e30);
+    }
+
+    // ─── premium curve shape ─────────────────────────────────────────────────
+
+    /// Premium is always in [1.0×, 1 + EXTRA]× — no underflow, no overflow.
+    function testFuzz_Premium_AlwaysInBounds(uint256 supply) public view {
+        supply = bound(supply, 0, type(uint128).max);
+        uint256 p = curve.premium(supply);
+        assertGe(p, 1e18, "premium below floor");
+        assertLe(p, 1e18 + EXTRA_PREMIUM, "premium above cap");
+    }
+
+    /// Higher supply → higher (or equal) premium. Monotonic.
+    function testFuzz_Premium_Monotonic(uint256 s1, uint256 s2) public view {
+        s1 = bound(s1, 0, PREMIUM_CAP_SUPPLY * 3);
+        s2 = bound(s2, 0, PREMIUM_CAP_SUPPLY * 3);
+        if (s1 <= s2) {
+            assertLe(curve.premium(s1), curve.premium(s2));
+        } else {
+            assertGe(curve.premium(s1), curve.premium(s2));
+        }
+    }
+
+    /// Premium at exactly 0 must be exactly 1.0× — first buyer pays no premium.
+    function testFuzz_Premium_ZeroIsExactlyOne(uint256 dummy) public view {
+        // dummy parameter just to make this a fuzz target — Foundry will still
+        // hammer it many times to confirm.
+        dummy;
+        assertEq(curve.premium(0), 1e18);
+    }
+
+    /// Premium at graduation or above must be exactly the cap.
+    function testFuzz_Premium_AboveGradIsCap(uint256 supply) public view {
+        supply = bound(supply, PREMIUM_CAP_SUPPLY, type(uint128).max);
+        assertEq(curve.premium(supply), 1e18 + EXTRA_PREMIUM);
+    }
+
+    // ─── first-mint anchor ───────────────────────────────────────────────────
+
+    /// First buy on empty supply must always produce `usdcIn * 1e12` AGENT.
+    /// Any drift here means our anchor logic broke.
+    function testFuzz_FirstBuy_AlwaysAnchored(uint96 usdcIn) public {
+        usdcIn = uint96(bound(usdcIn, 1, type(uint96).max / 1e12));
+        vm.startPrank(alice);
+        usdc.approve(address(curve), usdcIn);
+        uint256 agentOut = curve.buy(usdcIn, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        vm.stopPrank();
+
+        assertEq(agentOut, uint256(usdcIn) * 1e12, "first buy not anchored 1:1");
+        assertEq(curve.balanceOf(alice), uint256(usdcIn) * 1e12);
+    }
+
+    // ─── quote vs actual ─────────────────────────────────────────────────────
+
+    /// quoteBuy(x) must equal the agentOut buy(x) actually produces, on the
+    /// same state. If these ever diverge, frontends will mislead users.
+    function testFuzz_Quote_MatchesActual(uint96 aliceUsdc, uint96 bobUsdc) public {
+        aliceUsdc = uint96(bound(aliceUsdc, 1e6, 1_000_000e6));
+        bobUsdc = uint96(bound(bobUsdc, 1e6, 1_000_000e6));
+
+        // Alice anchors.
+        vm.startPrank(alice);
+        usdc.approve(address(curve), aliceUsdc);
+        curve.buy(aliceUsdc, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        vm.stopPrank();
+
+        // Quote Bob's buy, then execute.
+        uint256 quoted = curve.quoteBuy(bobUsdc);
+        vm.startPrank(bob);
+        usdc.approve(address(curve), bobUsdc);
+        uint256 actual = curve.buy(bobUsdc, 0, _emptyMinLtOuts(), bob, block.timestamp);
+        vm.stopPrank();
+
+        assertEq(actual, quoted, "quote diverged from actual");
+    }
+
+    // ─── no free money on round-trip ─────────────────────────────────────────
+
+    /// Buy then immediately sell (at NAV floor) — the buyer must walk away
+    /// with NO MORE notional than they put in. The premium they paid stays
+    /// with existing holders.
+    function testFuzz_BuyThenSell_NoFreeMoney(uint96 aliceUsdc, uint96 bobUsdc) public {
+        aliceUsdc = uint96(bound(aliceUsdc, 100e6, 100_000e6));
+        bobUsdc = uint96(bound(bobUsdc, 1e6, 10_000e6));
+
+        // Alice anchors so Bob isn't the first buyer.
+        vm.startPrank(alice);
+        usdc.approve(address(curve), aliceUsdc);
+        curve.buy(aliceUsdc, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdc.approve(address(curve), bobUsdc);
+        uint256 bobAgent = curve.buy(bobUsdc, 0, _emptyMinLtOuts(), bob, block.timestamp);
+
+        // Bob's NAV-floor exit value, *before* any other action.
+        uint256 sellNotional = curve.quoteSellNotional(bobAgent);
+        vm.stopPrank();
+
+        assertLe(sellNotional, bobUsdc, "buyer can extract more than they paid");
+    }
+
+    /// At zero supply (first buyer), there's no premium → no free money to
+    /// transfer either. Notional should be exactly equal to usdcIn (modulo
+    /// rounding, but mocks are zero-fee).
+    function testFuzz_FirstBuyer_NotionalEqualsPaid(uint96 usdcIn) public {
+        usdcIn = uint96(bound(usdcIn, 1e6, 1_000_000e6));
+        vm.startPrank(alice);
+        usdc.approve(address(curve), usdcIn);
+        uint256 agentOut = curve.buy(usdcIn, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        uint256 notional = curve.quoteSellNotional(agentOut);
+        vm.stopPrank();
+        // First buyer pays no premium and faces no LT fees in mocks → exact.
+        assertApproxEqAbs(notional, usdcIn, 1, "first buyer round-trip not flat");
+    }
+
+    // ─── monotonic worsening for later buyers ────────────────────────────────
+
+    /// At higher supply, the same USDC buys you fewer AGENT.
+    /// (Equivalent: each new buyer pays a worse-or-equal price than the prior.)
+    function testFuzz_LaterBuyer_GetsLessOrEqual(uint96 aliceUsdc, uint96 sameUsdc) public {
+        aliceUsdc = uint96(bound(aliceUsdc, 100e6, 100_000e6));
+        sameUsdc = uint96(bound(sameUsdc, 1e6, 1000e6));
+
+        // Two-step: alice buys early at lower supply, bob buys later (after
+        // alice) at higher supply. Bob's same-USDC purchase should give him
+        // ≤ what alice would get for the SAME usdcIn at her supply level.
+
+        // Alice buys at supply 0 → anchored: aliceGetsForSame = sameUsdc * 1e12
+        uint256 aliceGetsForSameAtZero = uint256(sameUsdc) * 1e12;
+
+        // Bring supply up to aliceUsdc * 1e12 via alice's actual buy.
+        vm.startPrank(alice);
+        usdc.approve(address(curve), aliceUsdc);
+        curve.buy(aliceUsdc, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        vm.stopPrank();
+
+        // Now bob buys sameUsdc at the new supply.
+        vm.startPrank(bob);
+        usdc.approve(address(curve), sameUsdc);
+        uint256 bobAgent = curve.buy(sameUsdc, 0, _emptyMinLtOuts(), bob, block.timestamp);
+        vm.stopPrank();
+
+        assertLe(bobAgent, aliceGetsForSameAtZero, "later buyer didn't pay more");
+    }
+
+    // ─── proportional sell ───────────────────────────────────────────────────
+
+    /// Selling X% of total supply transfers exactly X% of each LT balance.
+    /// (Within 1 wei of rounding.) Catches off-by-one in withdrawLtsTo.
+    function testFuzz_Sell_ProRataExact(uint96 totalUsdc, uint16 pctBps) public {
+        totalUsdc = uint96(bound(totalUsdc, 100e6, 1_000_000e6));
+        // Pct: 1 bp (0.01%) to 9999 bp (99.99%).
+        pctBps = uint16(bound(uint256(pctBps), 1, 9999));
+
+        vm.startPrank(alice);
+        usdc.approve(address(curve), totalUsdc);
+        curve.buy(totalUsdc, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        uint256 aliceAgent = curve.balanceOf(alice);
+        uint256 sellAmount = (aliceAgent * pctBps) / 10000;
+        if (sellAmount == 0) {
+            vm.stopPrank();
+            return; // skip degenerate input
+        }
+
+        uint256 ltABefore = IERC20(address(ltA)).balanceOf(address(treasury));
+        uint256 ltBBefore = IERC20(address(ltB)).balanceOf(address(treasury));
+
+        curve.sell(sellAmount, alice, 0, block.timestamp);
+        vm.stopPrank();
+
+        // Alice should now hold (sellAmount/totalSupply) of each LT.
+        // Since the sell uses supplyBefore = aliceAgent (alice was sole holder),
+        // alice receives sellAmount/aliceAgent of each treasury balance.
+        uint256 expectedLtA = (ltABefore * sellAmount) / aliceAgent;
+        uint256 expectedLtB = (ltBBefore * sellAmount) / aliceAgent;
+
+        assertEq(IERC20(address(ltA)).balanceOf(alice), expectedLtA, "ltA pro-rata off");
+        assertEq(IERC20(address(ltB)).balanceOf(alice), expectedLtB, "ltB pro-rata off");
+    }
+
+    /// Sell payout must NEVER exceed the seller's notional share of NAV,
+    /// and must be within a few wei of it.
+    ///
+    /// Invariant: `nav_before - nav_after ≤ notional`, where
+    /// `notional = nav_before × sellAmount / supplyBefore`. The lower bound
+    /// is `notional − tolerance` (≤ one wei per LT leg due to integer floor
+    /// in `(bal × remaining / totalLtValue)`). With a 2-leg portfolio we
+    /// tolerate up to 2 wei of rounding loss to the treasury (favours
+    /// remaining holders — never the seller).
+    function testFuzz_WithdrawLtsTo_NeverOverPaysNotional(uint96 totalUsdc, uint16 sellPctBps, uint64 idleDonation)
+        public
+    {
+        totalUsdc = uint96(bound(totalUsdc, 100e6, 1_000_000e6));
+        sellPctBps = uint16(bound(uint256(sellPctBps), 1, 9999));
+        // Idle donation ranges from 0 (regime C: all LT) up to ~50% of basket
+        // size (regime B: mixed payout). With nothing donated we exercise the
+        // pure-LT branch; with a lot, we exercise the USDC-covers-everything
+        // and partial-fallback branches.
+        idleDonation = uint64(bound(uint256(idleDonation), 0, uint256(totalUsdc) / 2));
+
+        vm.startPrank(alice);
+        usdc.approve(address(curve), totalUsdc);
+        curve.buy(totalUsdc, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        vm.stopPrank();
+
+        // Donate idle USDC into the treasury so the USDC-first leg has stock.
+        if (idleDonation > 0) usdc.mint(address(treasury), idleDonation);
+
+        uint256 aliceAgent = curve.balanceOf(alice);
+        uint256 sellAmount = (aliceAgent * sellPctBps) / 10000;
+        if (sellAmount == 0) return; // degenerate input
+
+        uint256 navBefore = treasury.nav();
+        uint256 notional = (navBefore * sellAmount) / aliceAgent;
+
+        vm.prank(alice);
+        curve.sell(sellAmount, alice, 0, block.timestamp);
+
+        uint256 navAfter = treasury.nav();
+        uint256 actualPayoutValue = navBefore - navAfter;
+
+        // Upper bound: we never over-pay.
+        assertLe(actualPayoutValue, notional, "over-paid seller relative to notional");
+        // Lower bound: rounding losses are bounded by leg count.
+        // With 2 legs we may lose up to ~2 wei of value to truncation.
+        assertGe(actualPayoutValue + 2, notional, "under-paid seller by more than tolerance");
+    }
+
+    // ─── NAV conservation on rebalance ───────────────────────────────────────
+
+    /// Rebalancing weights preserves NAV (in zero-fee mock world). Any drift
+    /// indicates the shrink/grow loops are losing or gaining value.
+    function testFuzz_Rebalance_PreservesNav(uint96 totalUsdc, uint16 newA) public {
+        totalUsdc = uint96(bound(totalUsdc, 100e6, 100_000e6));
+        newA = uint16(bound(uint256(newA), 1000, 7000)); // respect MAX_SINGLE_WEIGHT_BPS=7000
+        uint16 newB = 10000 - newA;
+        if (newB > 7000) {
+            // also respect max for second leg
+            newA = 3000;
+            newB = 7000;
+        }
+
+        vm.startPrank(alice);
+        usdc.approve(address(curve), totalUsdc);
+        curve.buy(totalUsdc, 0, _emptyMinLtOuts(), alice, block.timestamp);
+        vm.stopPrank();
+
+        uint256 navBefore = treasury.nav();
+
+        AgentTreasury.AssetSpec[] memory portfolio = new AgentTreasury.AssetSpec[](2);
+        portfolio[0] = AgentTreasury.AssetSpec({symbol: "HYPE5L", lt: address(ltA), bps: newA});
+        portfolio[1] = AgentTreasury.AssetSpec({symbol: "BTC5L", lt: address(ltB), bps: newB});
+
+        vm.prank(rebalancer);
+        treasury.setTargetPortfolio(portfolio, "ipfs://test");
+
+        // Mock LTs are 1:1 with USDC at fixed exchangeRate=1e18, zero fees.
+        // NAV should be identical (up to rounding).
+        assertApproxEqAbs(treasury.nav(), navBefore, 10, "rebalance changed NAV");
+    }
+
+    function _emptyMinLtOuts() internal pure returns (uint256[] memory minLtOuts) {
+        minLtOuts = new uint256[](2);
+    }
+
+    function _currentLts() internal view returns (address[] memory lts) {
+        lts = new address[](2);
+        lts[0] = address(ltA);
+        lts[1] = address(ltB);
+    }
+}

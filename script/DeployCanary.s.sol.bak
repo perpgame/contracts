@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+import {Script, console2} from "forge-std/Script.sol";
+import {AgentTreasury} from "../src/AgentTreasury.sol";
+import {AgentCurve} from "../src/AgentCurve.sol";
+
+/// Canary deploy — minimal 2-LT universe so the buy/sell/rebalance paths can
+/// be exercised at small capital ($20+).
+///
+/// Why 2 LTs at 50/50: Bounce Tech enforces a $10 minimum per `LT.mint()` call.
+/// With our smallest weight × buy amount needing to clear $10, the universe
+/// shape sets the floor on the minimum useful buy:
+///
+///   6 LTs at min 10% → min buy $100  (production script, defer until funded)
+///   2 LTs at 50/50   → min buy $20   (this script — fits a small canary)
+///   1 LT  at 100%    → min buy $10   (debug only)
+///
+/// MAX_SINGLE_WEIGHT_BPS is set to 10000 (no cap) so canary tests can do
+/// full 100%/0% rebalance swings if needed. The production script keeps the
+/// safer 6000 (60%) cap.
+contract DeployCanary is Script {
+    address constant USDC = 0xb88339CB7199b77E23DB6E890353E22632Ba630f;
+
+    // Two highest-TVL LTs from the indexer (snapshot 2026-05-19).
+    address constant HYPE5L = 0x18b8539261cF9e760E7fEc4a8a73c50F0AE7baBE;
+    address constant BTC5L = 0xBe4e97a8FceeB1b82D64349FbA6Ff29B65Ad3B7d;
+
+    function run() external returns (AgentTreasury treasury, AgentCurve curve) {
+        uint256 deployerPk = vm.envUint("DEPLOYER_PK");
+        address rebalancer = vm.envAddress("REBALANCER");
+        address creator = vm.envAddress("CREATOR");
+        string memory agentName = vm.envOr("AGENT_NAME", string("Vol Vampire Canary"));
+        string memory agentTicker = vm.envOr("AGENT_TICKER", string("FANGC"));
+        uint256 premiumCapSupply = vm.envOr("PREMIUM_CAP_SUPPLY_WAD", uint256(30_000 * 1e18));
+        // 0.3e18 = +30% max premium at the cap. Late buyer pays 1.3× NAV.
+        // Earlier canary used 2e18 (+200%) — aggressive for $25 testing,
+        // punishing for late buyers at real scale.
+        uint256 extraPremium = vm.envOr("EXTRA_PREMIUM_WAD", uint256(0.3e18));
+
+        AgentTreasury.AssetSpec[] memory portfolio = new AgentTreasury.AssetSpec[](2);
+        portfolio[0] = AgentTreasury.AssetSpec({symbol: "HYPE5L", lt: HYPE5L, bps: 5000});
+        portfolio[1] = AgentTreasury.AssetSpec({symbol: "BTC5L", lt: BTC5L, bps: 5000});
+
+        console2.log("Deploying canary:", agentName, agentTicker);
+        console2.log("  rebalancer:", rebalancer);
+        console2.log("  creator:   ", creator);
+
+        vm.startBroadcast(deployerPk);
+
+        // Bounce's LeveragedTokenHelper on HyperEVM mainnet.
+        address ltHelper = 0x69028FFb4e18c068fC65917ca7152c29e4B38B01;
+
+        treasury = new AgentTreasury(
+            USDC,
+            rebalancer,
+            creator,
+            ltHelper,
+            portfolio,
+            "ipfs://canary-genesis"
+        );
+
+        curve = new AgentCurve(agentName, agentTicker, address(treasury), premiumCapSupply, extraPremium);
+
+        treasury.setCurve(address(curve));
+
+        vm.stopBroadcast();
+
+        console2.log("AgentTreasury (canary):", address(treasury));
+        console2.log("AgentCurve    (canary):", address(curve));
+    }
+}
