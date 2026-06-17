@@ -7,6 +7,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {IBounceGlobalStorage, IBounceLT} from "./interfaces/IBounceLT.sol";
 import {AgentCurve} from "./AgentCurve.sol";
+import {TreasuryValuation, AssetConfig} from "./TreasuryValuation.sol";
 
 /// atomic-redeem capacity per LT
 interface ILeveragedTokenHelper {
@@ -38,12 +39,6 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     string public constant VERSION = "2.1.0-upgradeable";
 
     uint16 private constant BPS_DENOM = 10000;
-
-
-    /// USDC (6-dec) → 1e18 WAD. `ltToBaseAmount` returns 6-dec USDC, but the
-    /// buffer helper returns 18-dec (`baseAssetBalance().scaleFrom(6)`); scale
-    /// the former up before comparing the two.
-    uint256 private constant USDC_TO_WAD = 1e12;
 
     uint16 public constant MAX_ASSETS = 20;
 
@@ -87,11 +82,8 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     /// slots across beacon upgrades. Decrement when appending new storage.
     uint256[48] private __gap;
 
-    struct AssetConfig {
-        address lt;
-        uint16 targetBps;
-        bool registered;
-    }
+    // AssetConfig lives in TreasuryValuation.sol so the library and this
+    // contract share one definition (the storage layout for `assets`).
 
     struct AssetSpec {
         string symbol;
@@ -696,66 +688,22 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     }
 
     function _heldLtValues() internal view returns (uint256[] memory ltValues, uint256 totalLtValue) {
-        uint256 n = symbols.length;
-        ltValues = new uint256[](n);
-        for (uint256 i = 0; i < n; i++) {
-            IBounceLT lt = IBounceLT(assets[symbols[i]].lt);
-            uint256 bal = lt.balanceOf(address(this));
-            if (bal == 0) continue;
-            ltValues[i] = lt.ltToBaseAmount(bal);
-            totalLtValue += ltValues[i];
-        }
+        return TreasuryValuation.heldLtValues(symbols, assets);
     }
 
     function _redeemFitsBuffer(IBounceLT lt, uint256 expectedBase) internal view returns (bool) {
-        int256 bufferRaw = LT_HELPER.getLeveragedTokenBufferAssetValue(address(lt));
-        uint256 buffer = bufferRaw < 0 ? 0 : uint256(bufferRaw);
-        return expectedBase * USDC_TO_WAD <= buffer;
+        return TreasuryValuation.redeemFitsBuffer(address(LT_HELPER), lt, expectedBase);
     }
 
     /// Sum of all LTs held + idle USDC
-    function nav() public view returns (uint256 total) {
-        uint256 n = symbols.length;
-        for (uint256 i = 0; i < n; i++) {
-            IBounceLT lt = IBounceLT(assets[symbols[i]].lt);
-            uint256 bal = lt.balanceOf(address(this));
-            if (bal > 0) total += lt.ltToBaseAmount(bal);
-        }
-        total += USDC.balanceOf(address(this));
-        return total;
+    function nav() public view returns (uint256) {
+        return TreasuryValuation.nav(symbols, assets, USDC);
     }
 
     function quoteWithdrawUsdc(uint256 agentShares, uint256 totalShares) public view returns (uint256) {
-        if (agentShares == 0 || totalShares == 0) return 0;
-
-        uint256 n = symbols.length;
-        uint256 idle = USDC.balanceOf(address(this));
-
-        (uint256[] memory ltValues, uint256 totalLtValue) = _heldLtValues();
-
-        uint256 notional = ((idle + totalLtValue) * agentShares) / totalShares;
-        uint256 idlePaid = (idle * agentShares) / totalShares;
-        uint256 remaining = notional - idlePaid;
-
-        uint256 redeemable = 0;
-        if (remaining > 0 && totalLtValue > 0) {
-            uint256 minTx = _minTransactionSize();
-            for (uint256 i = 0; i < n; i++) {
-                if (ltValues[i] == 0) continue;
-                
-                IBounceLT lt = IBounceLT(assets[symbols[i]].lt);
-                uint256 ltOut = (lt.balanceOf(address(this)) * remaining) / totalLtValue;
-                if (ltOut == 0) continue;
-
-                uint256 expectedBase = lt.ltToBaseAmount(ltOut);
-                if (expectedBase < minTx) continue;
-
-                if (_redeemFitsBuffer(lt, expectedBase)) redeemable += expectedBase;
-            }
-        }
-
-        uint256 gross = idlePaid + redeemable;
-        return gross - (gross * feeBps()) / BPS_DENOM;
+        return TreasuryValuation.quoteWithdrawUsdc(
+            symbols, assets, USDC, address(LT_HELPER), agentShares, totalShares, _minTransactionSize(), feeBps()
+        );
     }
 
     /// nav() plus the value of in-flight (escrowed) redemptions. `prepareRedeem`
@@ -764,14 +712,8 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     /// buy targets after the sell loop: redeems pay fees and checkpoint the LTs
     /// (lowering true nav and rates), so targets must be measured against the
     /// post-sell value while still counting redemptions that haven't settled.
-    function _navWithPendingRedemptions() internal view returns (uint256 total) {
-        uint256 n = symbols.length;
-        for (uint256 i = 0; i < n; i++) {
-            IBounceLT lt = IBounceLT(assets[symbols[i]].lt);
-            uint256 held = lt.balanceOf(address(this)) + lt.userCredit(address(this));
-            if (held > 0) total += lt.ltToBaseAmount(held);
-        }
-        total += USDC.balanceOf(address(this));
+    function _navWithPendingRedemptions() internal view returns (uint256) {
+        return TreasuryValuation.navWithPendingRedemptions(symbols, assets, USDC);
     }
 
     function assetCount() external view returns (uint256) {
