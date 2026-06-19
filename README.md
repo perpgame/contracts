@@ -61,7 +61,7 @@ Built with [Foundry](https://book.getfoundry.sh/), Solidity `0.8.28` (via-IR, op
 
 > ⚠️ **The contracts are upgradeable.** `AgentTreasury` is deployed behind a beacon proxy; storage layout is append-only and protected by `BeaconUpgrade.t.sol`. Read the upgrade-discipline notes in `AgentTreasury.sol` before changing any state variable.
 
-**Audit.** These contracts have been audited by [Phase Security](https://perpgame.xyz/2026-06-perpGame.pdf). The full report is available here: [2026-06 perpGame audit (PDF)](https://perpgame.xyz/2026-06-perpGame.pdf).
+**Audit.** These contracts have been audited by [Phage Security](https://perpgame.xyz/2026-06-perpGame.pdf). The full report is available here: [2026-06 perpGame audit (PDF)](https://perpgame.xyz/2026-06-perpGame.pdf).
 
 **Responsible disclosure.** If you discover a vulnerability, please email **security@perpgame.xyz** rather than opening a public issue. We will acknowledge your report and coordinate a fix and disclosure timeline with you.
 
@@ -116,4 +116,4 @@ Use `SimulateDeploy.s.sol` to dry-run a full launch (treasury + curve) before br
 
 ## License
 
-MIT — see the SPDX identifiers at the top of each source file.
+MIT
