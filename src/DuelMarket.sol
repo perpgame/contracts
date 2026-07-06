@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {IAgentTreasury} from "./interfaces/IAgentTreasury.sol";
 
 /// @title DuelMarket — parimutuel prediction market between two agent treasuries.
@@ -112,6 +113,47 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         d.status = Status.Open;
 
         emit DuelCreated(duelId, treasuryA, treasuryB, lockTime, expiryTime, msg.sender);
+    }
+
+    // --- bet ---
+
+    function bet(uint256 duelId, uint8 side, uint128 amount) public nonReentrant {
+        _bet(duelId, side, amount);
+    }
+
+    function betWithPermit(
+        uint256 duelId,
+        uint8 side,
+        uint128 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant {
+        // Best-effort permit: swallow failure so a front-run of the permit
+        // (same owner/spender/nonce) can't DoS the bet — the safeTransferFrom
+        // below still enforces allowance.
+        try IERC20Permit(address(USDC)).permit(msg.sender, address(this), amount, deadline, v, r, s) {} catch {}
+        _bet(duelId, side, amount);
+    }
+
+    function _bet(uint256 duelId, uint8 side, uint128 amount) internal {
+        if (paused) revert IsPaused();
+        Duel storage d = duels[duelId];
+        if (d.status != Status.Open) revert NotOpen();
+        if (block.timestamp >= d.lockTime) revert BettingClosed();
+        if (amount < MIN_BET) revert BelowMinBet();
+        if (side > 1) revert BadSide();
+
+        USDC.safeTransferFrom(msg.sender, address(this), amount);
+        if (side == 0) {
+            stakeA[duelId][msg.sender] += amount;
+            d.poolA += amount;
+        } else {
+            stakeB[duelId][msg.sender] += amount;
+            d.poolB += amount;
+        }
+        emit BetPlaced(duelId, msg.sender, side, amount);
     }
 
     // --- views ---
