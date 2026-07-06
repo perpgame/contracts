@@ -26,6 +26,12 @@ const ARTIFACTS = [
     abiVar: "agentCurveAbi",
     bytecodeVar: "agentCurveBytecode",
   },
+  {
+    sol: "DuelMarket.sol",
+    name: "DuelMarket",
+    abiVar: "duelMarketAbi",
+    bytecodeVar: "duelMarketBytecode",
+  },
 ];
 
 mkdirSync(webContractsDir, { recursive: true });
