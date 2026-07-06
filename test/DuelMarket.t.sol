@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {DuelMarket} from "../src/DuelMarket.sol";
 import {MockAgentTreasury} from "./mocks/MockAgentTreasury.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
+import {MockReentrantUSDC, IReentrantReceiver} from "./mocks/MockReentrantUSDC.sol";
 
 contract DuelMarketTest is Test {
     DuelMarket market;
@@ -480,5 +481,131 @@ contract DuelMarketTest is Test {
         assertEq(d.poolA, 50e6);
         assertEq(market.stakeA(id, alice), 50e6);
         assertEq(usdc.balanceOf(address(market)), 50e6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reentrancy guard tests
+    // -----------------------------------------------------------------------
+    //
+    // Approach: genuine malicious-token reentrancy.
+    //
+    // MockUSDC is a plain OZ ERC20 with no transfer hook, so it cannot be used
+    // to trigger a reentrant call-back. Instead we deploy MockReentrantUSDC,
+    // which overrides `_update` to call `IReentrantReceiver(to).onReceive()`
+    // when the receiver is armed. A `ReentrantClaimReceiver` contract receives
+    // USDC from the market and immediately tries to call `market.claim(id)`
+    // again from inside `onReceive`.
+    //
+    // The test proves both layers of the belt-and-suspenders defence:
+    //   Layer 1 — nonReentrant:  The reentrant call enters a new `claim` frame
+    //             while the first `claim` is still executing. OZ ReentrancyGuard
+    //             fires `ReentrancyGuardReentrantCall` and reverts it.
+    //   Layer 2 — checks-effects: Even if the guard were absent, `claimed` is
+    //             set to `true` BEFORE `safeTransfer`, so a second call would
+    //             hit `AlreadyClaimed` and still revert.
+    //
+    // We assert that `onReceive` records a revert selector (either of the two
+    // above) so the test fails if neither guard fires.
+
+    function test_claim_cannotDoubleClaim_reentrancyGuarded() public {
+        // --- setup: fresh market with the malicious token ---
+        MockReentrantUSDC rUsdc = new MockReentrantUSDC();
+        MockAgentTreasury rA    = new MockAgentTreasury(1_000e6);
+        MockAgentTreasury rB    = new MockAgentTreasury(1_000e6);
+        DuelMarket rMarket      = new DuelMarket(address(rUsdc), feeRecipient, FEE_BPS, owner);
+
+        uint64 lockTime = uint64(block.timestamp + 2 hours);
+        uint64 expiry   = lockTime + 1 days;
+        uint256 id      = rMarket.createDuel(address(rA), address(rB), lockTime, expiry);
+
+        // Deploy the reentrant receiver contract and fund it via the token
+        ReentrantClaimReceiver attacker = new ReentrantClaimReceiver(rMarket, id);
+
+        uint128 stake = 100e6;
+        rUsdc.mint(address(attacker), stake);
+        // attacker approves market
+        vm.prank(address(attacker));
+        rUsdc.approve(address(rMarket), stake);
+
+        // Also fund bob on the other side so the duel is not voided
+        rUsdc.mint(bob, stake);
+        vm.prank(bob);
+        rUsdc.approve(address(rMarket), stake);
+
+        // attacker bets on side A
+        vm.prank(address(attacker));
+        rMarket.bet(id, 0, stake);
+        // bob bets on side B
+        vm.prank(bob);
+        rMarket.bet(id, 1, stake);
+
+        // lock + resolve with A winning
+        vm.warp(lockTime);
+        rMarket.lock(id);
+        rA.setNav(1_200e6); // A wins
+        vm.warp(expiry);
+        rMarket.resolve(id);
+
+        // Arm the reentrant hook: when rUsdc transfers to attacker, it fires onReceive
+        rUsdc.arm(address(attacker));
+
+        // The first claim should succeed; the reentrant second claim inside onReceive
+        // must revert. ReentrantClaimReceiver stores the revert data for inspection.
+        vm.prank(address(attacker));
+        rMarket.claim(id);
+
+        // The attacker contract's reentrant call was blocked
+        assertTrue(attacker.reentrancyCaught(), "reentrancy was NOT caught - guard missing");
+
+        // Verify the revert was one of the two expected guards
+        bytes4 revertSelector = attacker.caughtSelector();
+        bool isNonReentrantGuard = revertSelector == bytes4(keccak256("ReentrancyGuardReentrantCall()"));
+        bool isAlreadyClaimed    = revertSelector == DuelMarket.AlreadyClaimed.selector;
+        assertTrue(
+            isNonReentrantGuard || isAlreadyClaimed,
+            "unexpected revert selector on reentrant claim"
+        );
+
+        // The attacker received their legitimate payout (first claim succeeded)
+        assertGt(rUsdc.balanceOf(address(attacker)), 0, "attacker received no payout");
+
+        // The attacker did NOT receive a second payout (reentrancy was blocked)
+        assertTrue(rMarket.claimed(id, address(attacker)), "claim flag not set");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: reentrant receiver contract used in test_claim_cannotDoubleClaim_reentrancyGuarded
+// ---------------------------------------------------------------------------
+
+/// @notice A contract that bets on side A and, when it receives USDC from
+///         the market's claim() payout, immediately calls claim() again.
+///         The reentrant call must revert; we record the selector for inspection.
+contract ReentrantClaimReceiver is IReentrantReceiver {
+    DuelMarket public immutable market;
+    uint256    public immutable duelId;
+
+    bool   public reentrancyCaught;
+    bytes4 public caughtSelector;
+
+    constructor(DuelMarket market_, uint256 duelId_) {
+        market = market_;
+        duelId = duelId_;
+    }
+
+    /// @dev Called by MockReentrantUSDC._update during the first claim's safeTransfer.
+    function onReceive() external override {
+        // Attempt to re-enter claim(). This must revert.
+        try market.claim(duelId) {
+            // If we reach here, neither guard fired — the test will fail.
+            reentrancyCaught = false;
+        } catch (bytes memory reason) {
+            reentrancyCaught = true;
+            if (reason.length >= 4) {
+                bytes4 sel;
+                assembly { sel := mload(add(reason, 32)) }
+                caughtSelector = sel;
+            }
+        }
     }
 }
