@@ -51,6 +51,21 @@ contract DuelMarketTest is Test {
         market.createDuel(address(tA), address(tB), lock, lock + 1 days);
     }
 
+    function test_createDuel_reverts_zeroNavA() public {
+        tA.setNav(0);
+        uint64 lock = uint64(block.timestamp + 2 hours);
+        vm.expectRevert(DuelMarket.InvalidTreasury.selector);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days);
+    }
+
+    function test_createDuel_reverts_whenPaused() public {
+        vm.prank(owner);
+        market.setPaused(true);
+        uint64 lock = uint64(block.timestamp + 2 hours);
+        vm.expectRevert(DuelMarket.IsPaused.selector);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days);
+    }
+
     function test_createDuel_reverts_lockTooSoon() public {
         uint64 lock = uint64(block.timestamp + 10 minutes); // < MIN_BET_WINDOW
         vm.expectRevert(DuelMarket.BadTiming.selector);
