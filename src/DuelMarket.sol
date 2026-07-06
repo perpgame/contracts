@@ -29,7 +29,8 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         uint256 navEndA;
         uint256 navEndB;
         Status  status;
-        uint8   winner; // 0=A, 1=B, 2=tie (meaningful only when Resolved)
+        uint8   winner;          // 0=A, 1=B, 2=tie (meaningful only when Resolved)
+        uint16  feeBpsSnapshot;  // fee bps locked in at resolve time; used in claim()
     }
 
     IERC20 public immutable USDC;
@@ -189,8 +190,25 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         if (d.status != Status.Locked) revert WrongStatus();
         if (block.timestamp < d.expiryTime) revert TooEarly();
 
-        uint256 navEndA = IAgentTreasury(d.treasuryA).nav();
-        uint256 navEndB = IAgentTreasury(d.treasuryB).nav();
+        // F2 fix: if either treasury's nav() reverts (e.g. delisted/paused underlying),
+        // void the duel so bettors can reclaim stakes instead of freezing funds forever.
+        uint256 navEndA;
+        uint256 navEndB;
+        try IAgentTreasury(d.treasuryA).nav() returns (uint256 nA) {
+            navEndA = nA;
+        } catch {
+            d.status = Status.Voided;
+            emit DuelVoided(duelId);
+            return;
+        }
+        try IAgentTreasury(d.treasuryB).nav() returns (uint256 nB) {
+            navEndB = nB;
+        } catch {
+            d.status = Status.Voided;
+            emit DuelVoided(duelId);
+            return;
+        }
+
         d.navEndA = navEndA;
         d.navEndB = navEndB;
 
@@ -205,6 +223,9 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         else winner = 2;
 
         d.winner = winner;
+        // F1 fix: snapshot the current feeBps so claim() uses the same rate
+        // as the fee transfer below, regardless of future setFeeConfig() calls.
+        d.feeBpsSnapshot = feeBps;
         d.status = Status.Resolved;
 
         if (winner != 2) {
@@ -229,14 +250,16 @@ contract DuelMarket is Ownable, ReentrancyGuard {
             uint256 s = stakeA[duelId][msg.sender];
             if (s != 0) {
                 uint256 loserPool = uint256(d.poolB);
-                uint256 fee = loserPool * feeBps / 10_000;
+                // F1 fix: use per-duel snapshot, not the mutable live feeBps
+                uint256 fee = loserPool * d.feeBpsSnapshot / 10_000;
                 payout = s + (s * (loserPool - fee)) / uint256(d.poolA);
             }
         } else {
             uint256 s = stakeB[duelId][msg.sender];
             if (s != 0) {
                 uint256 loserPool = uint256(d.poolA);
-                uint256 fee = loserPool * feeBps / 10_000;
+                // F1 fix: use per-duel snapshot, not the mutable live feeBps
+                uint256 fee = loserPool * d.feeBpsSnapshot / 10_000;
                 payout = s + (s * (loserPool - fee)) / uint256(d.poolB);
             }
         }

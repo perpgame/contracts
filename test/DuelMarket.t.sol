@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {DuelMarket} from "../src/DuelMarket.sol";
 import {MockAgentTreasury} from "./mocks/MockAgentTreasury.sol";
+import {MockRevertingTreasury} from "./mocks/MockRevertingTreasury.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockReentrantUSDC, IReentrantReceiver} from "./mocks/MockReentrantUSDC.sol";
 
@@ -571,6 +572,117 @@ contract DuelMarketTest is Test {
 
         // The attacker did NOT receive a second payout (reentrancy was blocked)
         assertTrue(rMarket.claimed(id, address(attacker)), "claim flag not set");
+    }
+
+    // -----------------------------------------------------------------------
+    // F1 — fee snapshot: claim must use the fee bps locked in at resolve time,
+    //      not the live feeBps that may have been changed afterwards.
+    // -----------------------------------------------------------------------
+
+    /// @dev RED until feeBpsSnapshot field + claim fix applied.
+    function test_claim_usesFeeSnapshot_notLiveFeeBps() public {
+        // Setup: poolA = poolB = 100e6, resolve at FEE_BPS = 200 (2%)
+        uint256 id = _createAndBetBoth(); // alice side A 100e6, bob side B 100e6
+        _lockDuel(id);
+        tA.setNav(1_200e6); tB.setNav(1_100e6); // A wins
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id);
+
+        // fee at resolve: 2% of loserPool(100e6) = 2e6 already transferred out
+        uint256 feeRecipientAfterResolve = usdc.balanceOf(feeRecipient);
+        assertEq(feeRecipientAfterResolve, 2e6, "fee from resolve should be 2e6");
+
+        // Now owner changes feeBps to 10% AFTER resolve
+        vm.prank(owner);
+        market.setFeeConfig(1000, feeRecipient);
+
+        // Sole winner alice claims — payout must be computed at snapshot (200 bps), not live (1000 bps)
+        // Expected: stake(100e6) + (stake * (loserPool - fee_at_snapshot)) / poolA
+        //         = 100e6 + (100e6 * (100e6 - 2e6)) / 100e6
+        //         = 100e6 + 98e6 = 198e6
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        market.claim(id); // must not revert
+        uint256 alicePayout = usdc.balanceOf(alice) - aliceBefore;
+        assertEq(alicePayout, 198e6, "payout must use snapshot fee (2%), not live fee (10%)");
+
+        // Contract should be solvent: 200e6 deposited - 2e6 fee out - 198e6 to alice = 0 remaining
+        assertEq(usdc.balanceOf(address(market)), 0, "contract should be solvent after claim");
+
+        // ---- Second direction: resolve at 200, then setFeeConfig(0) — also no insolvency ----
+        // Fresh duel
+        address dave = address(0xDA4E);
+        address eve  = address(0xE4E);
+        uint256 id2 = _create();
+        _fund(dave, 100e6); vm.prank(dave); market.bet(id2, 0, 100e6);
+        _fund(eve, 100e6);  vm.prank(eve);  market.bet(id2, 1, 100e6);
+        _lockDuel(id2);
+        tA.setNav(1_500e6); tB.setNav(1_100e6); // A wins again
+        vm.warp(market.getDuel(id2).expiryTime);
+
+        // reset live feeBps back to 200 for resolve
+        vm.prank(owner);
+        market.setFeeConfig(200, feeRecipient);
+        market.resolve(id2);
+
+        // now set fee to 0 after resolve
+        vm.prank(owner);
+        market.setFeeConfig(0, feeRecipient);
+
+        // dave claims — should use snapshot of 200 bps, not 0
+        uint256 daveBefore = usdc.balanceOf(dave);
+        vm.prank(dave);
+        market.claim(id2);
+        uint256 davePayout = usdc.balanceOf(dave) - daveBefore;
+        assertEq(davePayout, 198e6, "payout must use snapshot fee (2%), not live 0%");
+    }
+
+    // -----------------------------------------------------------------------
+    // F2 — resolve must void (not revert forever) when nav() reverts mid-call.
+    // -----------------------------------------------------------------------
+
+    /// @dev RED until try/catch nav void applied in resolve().
+    function test_resolve_voidsWhenNavReverts() public {
+        // Use MockRevertingTreasury for side B so we can arm it mid-test
+        MockRevertingTreasury rtB = new MockRevertingTreasury(1_000e6);
+
+        uint64 lockTime = uint64(block.timestamp + 2 hours);
+        uint64 expiry   = lockTime + 1 days;
+        uint256 id = market.createDuel(address(tA), address(rtB), lockTime, expiry);
+
+        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6);
+        _fund(bob, 100e6);   vm.prank(bob);   market.bet(id, 1, 100e6);
+
+        // Lock succeeds — both navs are healthy
+        vm.warp(lockTime);
+        market.lock(id);
+        assertEq(uint8(market.getDuel(id).status), uint8(DuelMarket.Status.Locked));
+
+        // Arm the reverting treasury AFTER lock
+        rtB.setReverting(true);
+
+        // Warp past expiry and call resolve — must NOT revert, must void instead
+        vm.warp(expiry);
+        vm.expectEmit(true, false, false, false);
+        emit DuelMarket.DuelVoided(id);
+        market.resolve(id); // must succeed (not revert)
+
+        assertEq(uint8(market.getDuel(id).status), uint8(DuelMarket.Status.Voided),
+            "status should be Voided when nav() reverts");
+
+        // Both bettors reclaim full stakes (void path in claim)
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        market.claim(id);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 100e6, "alice stake refund");
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        market.claim(id);
+        assertEq(usdc.balanceOf(bob) - bobBefore, 100e6, "bob stake refund");
+
+        // Contract fully drained, no fee taken on void
+        assertEq(usdc.balanceOf(address(market)), 0, "contract drained after void refunds");
     }
 }
 
