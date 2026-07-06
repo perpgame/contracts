@@ -282,8 +282,16 @@ contract DuelMarketTest is Test {
         tA.setNav(1_100e6);
         tB.setNav(1_100e6);   // equal PnL%
         vm.warp(market.getDuel(id).expiryTime);
+
+        vm.expectEmit(true, false, false, true);
+        emit DuelMarket.DuelResolved(id, 2, 1_100e6, 1_100e6);
         market.resolve(id);
-        assertEq(market.getDuel(id).winner, 2);
+
+        DuelMarket.Duel memory d = market.getDuel(id);
+        assertEq(uint8(d.status), uint8(DuelMarket.Status.Resolved));
+        assertEq(d.winner, 2);
+        assertEq(d.navEndA, 1_100e6);
+        assertEq(d.navEndB, 1_100e6);
         assertEq(usdc.balanceOf(feeRecipient), 0);
     }
 

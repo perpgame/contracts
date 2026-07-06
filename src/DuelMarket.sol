@@ -6,6 +6,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IAgentTreasury} from "./interfaces/IAgentTreasury.sol";
 
 /// @title DuelMarket — parimutuel prediction market between two agent treasuries.
@@ -194,11 +195,9 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         d.navEndB = navEndB;
 
         // Signed PnL in 1e18 fixed point. navStart is guaranteed > 0 (set in lock()).
-        // casting uint256 nav values to int256 is safe: realistic NAV values are well within int256 range.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        int256 pnlA = (int256(navEndA) - int256(d.navStartA)) * 1e18 / int256(d.navStartA);
-        // forge-lint: disable-next-line(unsafe-typecast)
-        int256 pnlB = (int256(navEndB) - int256(d.navStartB)) * 1e18 / int256(d.navStartB);
+        // SafeCast reverts on genuine overflow instead of silently wrapping.
+        int256 pnlA = (SafeCast.toInt256(navEndA) - SafeCast.toInt256(d.navStartA)) * 1e18 / SafeCast.toInt256(d.navStartA);
+        int256 pnlB = (SafeCast.toInt256(navEndB) - SafeCast.toInt256(d.navStartB)) * 1e18 / SafeCast.toInt256(d.navStartB);
 
         uint8 winner;
         if (pnlA > pnlB) winner = 0;
