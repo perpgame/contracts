@@ -132,6 +132,16 @@ contract DuelMarketTest is Test {
         market.bet(id, 0, 10e6);
     }
 
+    function test_bet_reverts_whenPaused() public {
+        uint256 id = _create();
+        vm.prank(owner);
+        market.setPaused(true);
+        _fund(alice, 100e6);
+        vm.prank(alice);
+        vm.expectRevert(DuelMarket.IsPaused.selector);
+        market.bet(id, 0, 100e6);
+    }
+
     function test_betWithPermit_singleTx() public {
         uint256 id = _create();
         // Mint directly (no prior approve needed — permit will grant allowance)
@@ -155,5 +165,40 @@ contract DuelMarketTest is Test {
         DuelMarket.Duel memory d = market.getDuel(id);
         assertEq(d.poolB, 50e6);
         assertEq(market.stakeB(id, alice), 50e6);
+    }
+
+    function test_betWithPermit_toleratesStalePermit() public {
+        uint256 id = _create();
+        usdc.mint(alice, 50e6);
+
+        // Build + sign an EIP-2612 permit for the market spending 50e6.
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 structHash = keccak256(abi.encode(
+            keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
+            alice,
+            address(market),
+            uint256(50e6),
+            usdc.nonces(alice),
+            deadline
+        ));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(alicePk, digest);
+
+        // Front-run: consume the nonce directly so the signature is now stale.
+        usdc.permit(alice, address(market), 50e6, deadline, v, r, s);
+
+        // Alice separately grants allowance the normal way.
+        vm.prank(alice);
+        usdc.approve(address(market), 50e6);
+
+        // betWithPermit with the STALE signature must still land: the permit
+        // reverts inside the try/catch and the bet uses the existing allowance.
+        vm.prank(alice);
+        market.betWithPermit(id, 0, 50e6, deadline, v, r, s);
+
+        DuelMarket.Duel memory d = market.getDuel(id);
+        assertEq(d.poolA, 50e6);
+        assertEq(market.stakeA(id, alice), 50e6);
+        assertEq(usdc.balanceOf(address(market)), 50e6);
     }
 }
