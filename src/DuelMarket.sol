@@ -156,6 +156,31 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         emit BetPlaced(duelId, msg.sender, side, amount);
     }
 
+    // --- lock ---
+
+    function lock(uint256 duelId) external nonReentrant {
+        Duel storage d = duels[duelId];
+        if (d.status != Status.Open) revert WrongStatus();
+        if (block.timestamp < d.lockTime) revert TooEarly();
+
+        if (d.poolA == 0 || d.poolB == 0) {
+            d.status = Status.Voided;
+            emit DuelVoided(duelId);
+            return;
+        }
+        uint256 navA = IAgentTreasury(d.treasuryA).nav();
+        uint256 navB = IAgentTreasury(d.treasuryB).nav();
+        if (navA == 0 || navB == 0) {
+            d.status = Status.Voided;
+            emit DuelVoided(duelId);
+            return;
+        }
+        d.navStartA = navA;
+        d.navStartB = navB;
+        d.status = Status.Locked;
+        emit DuelLocked(duelId, navA, navB);
+    }
+
     // --- views ---
     function duelCount() external view returns (uint256) {
         return duels.length;

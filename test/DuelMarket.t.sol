@@ -167,6 +167,50 @@ contract DuelMarketTest is Test {
         assertEq(market.stakeB(id, alice), 50e6);
     }
 
+    // --- lock helpers ---
+
+    function _createAndBetBoth() internal returns (uint256 id) {
+        id = _create();
+        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6);
+        _fund(bob, 100e6);   vm.prank(bob);   market.bet(id, 1, 100e6);
+    }
+
+    // --- lock tests ---
+
+    function test_lock_snapshotsNav() public {
+        uint256 id = _createAndBetBoth();
+        DuelMarket.Duel memory d0 = market.getDuel(id);
+        vm.warp(d0.lockTime);
+        market.lock(id);
+        DuelMarket.Duel memory d = market.getDuel(id);
+        assertEq(uint8(d.status), uint8(DuelMarket.Status.Locked));
+        assertEq(d.navStartA, 1_000e6);
+        assertEq(d.navStartB, 1_000e6);
+    }
+
+    function test_lock_voidsWhenOneSided() public {
+        uint256 id = _create();
+        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // only A
+        DuelMarket.Duel memory d0 = market.getDuel(id);
+        vm.warp(d0.lockTime);
+        market.lock(id);
+        assertEq(uint8(market.getDuel(id).status), uint8(DuelMarket.Status.Voided));
+    }
+
+    function test_lock_reverts_tooEarly() public {
+        uint256 id = _createAndBetBoth();
+        vm.expectRevert(DuelMarket.TooEarly.selector);
+        market.lock(id);
+    }
+
+    function test_lock_reverts_wrongStatus_ifAlreadyLocked() public {
+        uint256 id = _createAndBetBoth();
+        vm.warp(market.getDuel(id).lockTime);
+        market.lock(id);
+        vm.expectRevert(DuelMarket.WrongStatus.selector);
+        market.lock(id);
+    }
+
     function test_betWithPermit_toleratesStalePermit() public {
         uint256 id = _create();
         usdc.mint(alice, 50e6);
