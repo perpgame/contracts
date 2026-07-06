@@ -309,6 +309,95 @@ contract DuelMarketTest is Test {
         market.resolve(id);
     }
 
+    // --- claim tests ---
+
+    function test_claim_winnerGetsStakePlusShare() public {
+        uint256 id = _createAndBetBoth(); // alice A 100e6, bob B 100e6
+        _lockDuel(id);
+        tA.setNav(1_200e6); tB.setNav(1_100e6); // A wins
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id);
+
+        // loserPool=100e6, fee=2e6, distributable=98e6. Alice is sole winner.
+        uint256 before = usdc.balanceOf(alice);
+        vm.expectEmit(true, true, false, true);
+        emit DuelMarket.Claimed(id, alice, 198e6);
+        vm.prank(alice);
+        market.claim(id);
+        assertEq(usdc.balanceOf(alice) - before, 100e6 + 98e6); // stake + all winnings
+        assertTrue(market.claimed(id, alice));
+    }
+
+    function test_claim_winnerBGetsStakePlusShare() public {
+        uint256 id = _createAndBetBoth(); // alice A 100e6, bob B 100e6
+        _lockDuel(id);
+        tA.setNav(1_050e6); tB.setNav(1_200e6); // B wins
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id);
+
+        // loserPool=poolA=100e6, fee=2e6, distributable=98e6. Bob is sole winner.
+        uint256 before = usdc.balanceOf(bob);
+        vm.expectEmit(true, true, false, true);
+        emit DuelMarket.Claimed(id, bob, 198e6);
+        vm.prank(bob);
+        market.claim(id);
+        assertEq(usdc.balanceOf(bob) - before, 100e6 + 98e6); // stake + all winnings
+        assertTrue(market.claimed(id, bob));
+    }
+
+    function test_claim_loserGetsNothing() public {
+        uint256 id = _createAndBetBoth();
+        _lockDuel(id);
+        tA.setNav(1_200e6); tB.setNav(1_100e6); // A wins, bob (B) loses
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id);
+        vm.prank(bob);
+        vm.expectRevert(DuelMarket.NothingToClaim.selector);
+        market.claim(id);
+    }
+
+    function test_claim_twiceReverts() public {
+        uint256 id = _createAndBetBoth();
+        _lockDuel(id);
+        tA.setNav(1_200e6); tB.setNav(1_100e6);
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id);
+        vm.prank(alice); market.claim(id);
+        vm.prank(alice);
+        vm.expectRevert(DuelMarket.AlreadyClaimed.selector);
+        market.claim(id);
+    }
+
+    function test_claim_voidRefundsStake() public {
+        uint256 id = _create();
+        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // one-sided
+        _lockDuel(id); // -> Voided
+        uint256 before = usdc.balanceOf(alice);
+        vm.prank(alice); market.claim(id);
+        assertEq(usdc.balanceOf(alice) - before, 100e6);
+        assertTrue(market.claimed(id, alice));
+    }
+
+    function test_claim_tieRefundsStake() public {
+        uint256 id = _createAndBetBoth();
+        _lockDuel(id);
+        tA.setNav(1_100e6); tB.setNav(1_100e6); // tie
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id);
+        uint256 before = usdc.balanceOf(bob);
+        vm.prank(bob); market.claim(id);
+        assertEq(usdc.balanceOf(bob) - before, 100e6);
+        assertTrue(market.claimed(id, bob));
+    }
+
+    function test_claim_beforeResolveReverts() public {
+        uint256 id = _createAndBetBoth();
+        _lockDuel(id);
+        vm.prank(alice);
+        vm.expectRevert(DuelMarket.WrongStatus.selector);
+        market.claim(id);
+    }
+
     function test_betWithPermit_toleratesStalePermit() public {
         uint256 id = _create();
         usdc.mint(alice, 50e6);

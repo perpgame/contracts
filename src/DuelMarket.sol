@@ -215,6 +215,38 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         emit DuelResolved(duelId, winner, navEndA, navEndB);
     }
 
+    // --- claim ---
+
+    function claim(uint256 duelId) external nonReentrant {
+        Duel storage d = duels[duelId];
+        if (d.status != Status.Resolved && d.status != Status.Voided) revert WrongStatus();
+        if (claimed[duelId][msg.sender]) revert AlreadyClaimed();
+
+        uint256 payout;
+        if (d.status == Status.Voided || d.winner == 2) {
+            payout = uint256(stakeA[duelId][msg.sender]) + uint256(stakeB[duelId][msg.sender]);
+        } else if (d.winner == 0) {
+            uint256 s = stakeA[duelId][msg.sender];
+            if (s != 0) {
+                uint256 loserPool = uint256(d.poolB);
+                uint256 fee = loserPool * feeBps / 10_000;
+                payout = s + (s * (loserPool - fee)) / uint256(d.poolA);
+            }
+        } else {
+            uint256 s = stakeB[duelId][msg.sender];
+            if (s != 0) {
+                uint256 loserPool = uint256(d.poolA);
+                uint256 fee = loserPool * feeBps / 10_000;
+                payout = s + (s * (loserPool - fee)) / uint256(d.poolB);
+            }
+        }
+
+        if (payout == 0) revert NothingToClaim();
+        claimed[duelId][msg.sender] = true;           // effects before interaction
+        USDC.safeTransfer(msg.sender, payout);
+        emit Claimed(duelId, msg.sender, payout);
+    }
+
     // --- views ---
     function duelCount() external view returns (uint256) {
         return duels.length;
