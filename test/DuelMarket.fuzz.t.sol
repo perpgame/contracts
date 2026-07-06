@@ -175,20 +175,23 @@ contract DuelMarketFuzzTest is Test {
     ///   4. alice_payout + bob_payout == totalPot (exact, no dust on tie).
     function testFuzz_conservation_tie(
         uint128 aStake,
-        uint128 bStake
+        uint128 bStake,
+        uint64  tieNavRaw
     ) public {
         aStake = uint128(bound(aStake, 1e6, 1e15));
         bStake = uint128(bound(bStake, 1e6, 1e15));
+        // Fuzz the shared end-nav across gain / flat / loss relative to NAV_START.
+        // Both treasuries get the SAME value => identical PnL% => tie regardless.
+        uint256 tieNav = bound(tieNavRaw, 1, 2 * NAV_START);
 
         (DuelMarket market, MockUSDC usdc,
          MockAgentTreasury tA, MockAgentTreasury tB) = _deploy();
 
         uint256 id = _createBetLock(market, usdc, tA, tB, aStake, bStake);
 
-        // Both treasuries move to the same NAV => identical PnL% => tie
-        uint256 newNav = NAV_START + 1_000; // any identical non-zero value
-        tA.setNav(newNav);
-        tB.setNav(newNav);
+        // Both treasuries move to the same (fuzzed) NAV => identical PnL% => tie
+        tA.setNav(tieNav);
+        tB.setNav(tieNav);
 
         DuelMarket.Duel memory d = market.getDuel(id);
         vm.warp(d.expiryTime);
@@ -303,7 +306,18 @@ contract DuelMarketFuzzTest is Test {
         uint256 alicePayout = usdc.balanceOf(alice) - aliceBefore;
         uint256 carolPayout = usdc.balanceOf(carol) - carolBefore;
 
-        // Invariant 3+4: dust in [0, 2]
+        // Invariant 3: each winner's payout is exactly proportional to their stake.
+        // This discriminates a correct `s + s*distributable/winnerPool` formula from
+        // a broken `s + distributable/winnerPool` (or similar). The expected values
+        // floor exactly like the contract, so assertEq is valid.
+        uint256 distributable = loserPool - fee;
+        uint256 winnerPool    = uint256(aliceStake) + uint256(carolStake);
+        uint256 expectedAlice = uint256(aliceStake) + (uint256(aliceStake) * distributable) / winnerPool;
+        uint256 expectedCarol = uint256(carolStake) + (uint256(carolStake) * distributable) / winnerPool;
+        assertEq(alicePayout, expectedAlice, "alice not proportional");
+        assertEq(carolPayout, expectedCarol, "carol not proportional");
+
+        // Invariant 4: dust in [0, 2]
         uint256 paid = alicePayout + carolPayout;
         // Arithmetic will revert (underflow) if paid > totalPot - fee, proving solvency
         uint256 dust = (totalPot - fee) - paid;
