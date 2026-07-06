@@ -398,6 +398,55 @@ contract DuelMarketTest is Test {
         market.claim(id);
     }
 
+    function test_claim_multipleWinnersProRata() public {
+        address carol = address(0xCA401);
+        uint256 id = _create();
+        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // A
+        _fund(carol, 50e6);  vm.prank(carol); market.bet(id, 0, 50e6);  // A
+        _fund(bob, 100e6);   vm.prank(bob);   market.bet(id, 1, 100e6); // B
+        // poolA = 150e6, poolB = 100e6
+        _lockDuel(id);
+        tA.setNav(1_200e6); tB.setNav(1_100e6); // A wins
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id); // fee = 2% of poolB(100e6) = 2e6; distributable = 98e6
+
+        // Exact floor-division payouts:
+        // alice: 100e6 + 100e6*98e6/150e6 = 100e6 + 65_333333 = 165_333333
+        // carol:  50e6 +  50e6*98e6/150e6 =  50e6 + 32_666666 =  82_666666
+        uint256 expectedAlice = uint256(100e6) + (uint256(100e6) * 98e6) / 150e6;
+        uint256 expectedCarol = uint256(50e6) + (uint256(50e6) * 98e6) / 150e6;
+        assertEq(expectedAlice, 165_333333);
+        assertEq(expectedCarol, 82_666666);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice); market.claim(id);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, expectedAlice);
+
+        uint256 carolBefore = usdc.balanceOf(carol);
+        vm.prank(carol); market.claim(id);
+        assertEq(usdc.balanceOf(carol) - carolBefore, expectedCarol);
+
+        // bob (loser) gets nothing
+        vm.prank(bob);
+        vm.expectRevert(DuelMarket.NothingToClaim.selector);
+        market.claim(id);
+
+        // Conservation: winnerPool + (loserPool - fee) - payouts is only dust (<= #winners wei)
+        uint256 distributed = 150e6 + (100e6 - 2e6); // winnerPool + (loserPool - fee) = 248e6
+        uint256 dust = distributed - expectedAlice - expectedCarol;
+        assertLe(dust, 2);
+    }
+
+    function test_claim_voidNonParticipantReverts() public {
+        uint256 id = _create();
+        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // one-sided
+        _lockDuel(id); // -> Voided
+        // bob never staked on this duel
+        vm.prank(bob);
+        vm.expectRevert(DuelMarket.NothingToClaim.selector);
+        market.claim(id);
+    }
+
     function test_betWithPermit_toleratesStalePermit() public {
         uint256 id = _create();
         usdc.mint(alice, 50e6);
