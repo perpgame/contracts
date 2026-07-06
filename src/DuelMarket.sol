@@ -181,6 +181,41 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         emit DuelLocked(duelId, navA, navB);
     }
 
+    // --- resolve ---
+
+    function resolve(uint256 duelId) external nonReentrant {
+        Duel storage d = duels[duelId];
+        if (d.status != Status.Locked) revert WrongStatus();
+        if (block.timestamp < d.expiryTime) revert TooEarly();
+
+        uint256 navEndA = IAgentTreasury(d.treasuryA).nav();
+        uint256 navEndB = IAgentTreasury(d.treasuryB).nav();
+        d.navEndA = navEndA;
+        d.navEndB = navEndB;
+
+        // Signed PnL in 1e18 fixed point. navStart is guaranteed > 0 (set in lock()).
+        // casting uint256 nav values to int256 is safe: realistic NAV values are well within int256 range.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int256 pnlA = (int256(navEndA) - int256(d.navStartA)) * 1e18 / int256(d.navStartA);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int256 pnlB = (int256(navEndB) - int256(d.navStartB)) * 1e18 / int256(d.navStartB);
+
+        uint8 winner;
+        if (pnlA > pnlB) winner = 0;
+        else if (pnlB > pnlA) winner = 1;
+        else winner = 2;
+
+        d.winner = winner;
+        d.status = Status.Resolved;
+
+        if (winner != 2) {
+            uint256 loserPool = winner == 0 ? uint256(d.poolB) : uint256(d.poolA);
+            uint256 fee = loserPool * feeBps / 10_000;
+            if (fee > 0) USDC.safeTransfer(feeRecipient, fee);
+        }
+        emit DuelResolved(duelId, winner, navEndA, navEndB);
+    }
+
     // --- views ---
     function duelCount() external view returns (uint256) {
         return duels.length;

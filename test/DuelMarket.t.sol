@@ -226,6 +226,81 @@ contract DuelMarketTest is Test {
         market.lock(id);
     }
 
+    // --- resolve helpers ---
+
+    function _lockDuel(uint256 id) internal {
+        vm.warp(market.getDuel(id).lockTime);
+        market.lock(id);
+    }
+
+    // --- resolve tests ---
+
+    function test_resolve_A_wins_and_takesFee() public {
+        uint256 id = _createAndBetBoth();  // poolA=100e6, poolB=100e6, navs=1000e6
+        _lockDuel(id);
+        tA.setNav(1_200e6);   // +20%
+        tB.setNav(1_100e6);   // +10%
+        vm.warp(market.getDuel(id).expiryTime);
+
+        vm.expectEmit(true, false, false, true);
+        emit DuelMarket.DuelResolved(id, 0, 1_200e6, 1_100e6);
+        market.resolve(id);
+
+        DuelMarket.Duel memory d = market.getDuel(id);
+        assertEq(uint8(d.status), uint8(DuelMarket.Status.Resolved));
+        assertEq(d.winner, 0);
+        // fee = 2% of losing pool (poolB=100e6) = 2e6
+        assertEq(usdc.balanceOf(feeRecipient), 2e6);
+        // verify fee came from losing pool (B), not winning pool (A)
+        // contract held 200e6 total, feeRecipient gets 2e6 from poolB
+        assertEq(usdc.balanceOf(address(market)), 198e6);
+    }
+
+    function test_resolve_B_wins_and_takesFee() public {
+        uint256 id = _createAndBetBoth();  // poolA=100e6, poolB=100e6, navs=1000e6
+        _lockDuel(id);
+        tA.setNav(1_050e6);   // +5%
+        tB.setNav(1_200e6);   // +20%
+        vm.warp(market.getDuel(id).expiryTime);
+
+        vm.expectEmit(true, false, false, true);
+        emit DuelMarket.DuelResolved(id, 1, 1_050e6, 1_200e6);
+        market.resolve(id);
+
+        DuelMarket.Duel memory d = market.getDuel(id);
+        assertEq(uint8(d.status), uint8(DuelMarket.Status.Resolved));
+        assertEq(d.winner, 1);
+        // fee = 2% of losing pool (poolA=100e6) = 2e6
+        assertEq(usdc.balanceOf(feeRecipient), 2e6);
+        // verify fee came from losing pool (A), not winning pool (B)
+        assertEq(usdc.balanceOf(address(market)), 198e6);
+    }
+
+    function test_resolve_tie_noFee() public {
+        uint256 id = _createAndBetBoth();
+        _lockDuel(id);
+        tA.setNav(1_100e6);
+        tB.setNav(1_100e6);   // equal PnL%
+        vm.warp(market.getDuel(id).expiryTime);
+        market.resolve(id);
+        assertEq(market.getDuel(id).winner, 2);
+        assertEq(usdc.balanceOf(feeRecipient), 0);
+    }
+
+    function test_resolve_reverts_tooEarly() public {
+        uint256 id = _createAndBetBoth();
+        _lockDuel(id);
+        vm.expectRevert(DuelMarket.TooEarly.selector);
+        market.resolve(id);
+    }
+
+    function test_resolve_reverts_ifNotLocked() public {
+        uint256 id = _createAndBetBoth();
+        vm.warp(market.getDuel(id).expiryTime);
+        vm.expectRevert(DuelMarket.WrongStatus.selector);
+        market.resolve(id);
+    }
+
     function test_betWithPermit_toleratesStalePermit() public {
         uint256 id = _create();
         usdc.mint(alice, 50e6);
