@@ -181,6 +181,8 @@ contract DuelMarketTest is Test {
         uint256 id = _createAndBetBoth();
         DuelMarket.Duel memory d0 = market.getDuel(id);
         vm.warp(d0.lockTime);
+        vm.expectEmit(true, false, false, true);
+        emit DuelMarket.DuelLocked(id, 1_000e6, 1_000e6);
         market.lock(id);
         DuelMarket.Duel memory d = market.getDuel(id);
         assertEq(uint8(d.status), uint8(DuelMarket.Status.Locked));
@@ -193,6 +195,19 @@ contract DuelMarketTest is Test {
         _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // only A
         DuelMarket.Duel memory d0 = market.getDuel(id);
         vm.warp(d0.lockTime);
+        vm.expectEmit(true, false, false, false);
+        emit DuelMarket.DuelVoided(id);
+        market.lock(id);
+        assertEq(uint8(market.getDuel(id).status), uint8(DuelMarket.Status.Voided));
+    }
+
+    function test_lock_voidsWhenZeroNav() public {
+        uint256 id = _createAndBetBoth();
+        tA.setNav(0); // treasury A goes to zero nav after betting
+        DuelMarket.Duel memory d0 = market.getDuel(id);
+        vm.warp(d0.lockTime);
+        vm.expectEmit(true, false, false, false);
+        emit DuelMarket.DuelVoided(id);
         market.lock(id);
         assertEq(uint8(market.getDuel(id).status), uint8(DuelMarket.Status.Voided));
     }
