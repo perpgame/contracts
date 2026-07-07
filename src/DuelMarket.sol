@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IAgentTreasury} from "./interfaces/IAgentTreasury.sol";
 
 /// @title DuelMarket — parimutuel prediction market between two agent treasuries.
 /// @notice Trustless resolution: winner = higher treasury PnL% over [lock, expiry],
 ///         read directly from AgentTreasury.nav(). No oracle.
-/// @dev The protocol fee is a fixed 1% of the losing pool (FEE_BPS). Because the
-///      rate is a compile-time constant and the recipient is immutable, there is
-///      no mutable fee state to desync between resolve() and claim().
-contract DuelMarket is Ownable, ReentrancyGuard {
+/// @dev Fully permissionless and immutable: no owner, no pause, no admin function
+///      of any kind. The protocol fee is a fixed 1% of the losing pool (FEE_BPS),
+///      paid to an immutable feeRecipient set at deploy.
+contract DuelMarket is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     enum Status { Open, Locked, Resolved, Voided }
@@ -37,7 +35,6 @@ contract DuelMarket is Ownable, ReentrancyGuard {
 
     IERC20  public immutable USDC;
     address public immutable feeRecipient;
-    bool    public paused;
 
     uint16  public constant FEE_BPS        = 100;     // fixed 1% of the losing pool
     uint64  public constant MIN_BET_WINDOW = 1 hours; // lock must be >= now + this
@@ -56,7 +53,6 @@ contract DuelMarket is Ownable, ReentrancyGuard {
     event DuelResolved(uint256 indexed duelId, uint8 winner, uint256 navEndA, uint256 navEndB);
     event DuelVoided(uint256 indexed duelId);
     event Claimed(uint256 indexed duelId, address indexed bettor, uint256 payout);
-    event PausedSet(bool paused);
 
     error InvalidTreasury();
     error SameTreasury();
@@ -69,25 +65,16 @@ contract DuelMarket is Ownable, ReentrancyGuard {
     error WrongStatus();
     error AlreadyClaimed();
     error NothingToClaim();
-    error IsPaused();
 
-    constructor(address usdc, address feeRecipient_, address owner_) Ownable(owner_) {
+    constructor(address usdc, address feeRecipient_) {
         USDC = IERC20(usdc);
         feeRecipient = feeRecipient_;
     }
 
-    // --- admin ---
-    function setPaused(bool p) external onlyOwner {
-        paused = p;
-        emit PausedSet(p);
-    }
-
-    // --- create ---
     function createDuel(address treasuryA, address treasuryB, uint64 lockTime, uint64 expiryTime)
         external
         returns (uint256 duelId)
     {
-        if (paused) revert IsPaused();
         if (treasuryA == treasuryB) revert SameTreasury();
         if (IAgentTreasury(treasuryA).nav() == 0) revert InvalidTreasury();
         if (IAgentTreasury(treasuryB).nav() == 0) revert InvalidTreasury();
@@ -106,30 +93,8 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         emit DuelCreated(duelId, treasuryA, treasuryB, lockTime, expiryTime, msg.sender);
     }
 
-    // --- bet ---
 
-    function bet(uint256 duelId, uint8 side, uint128 amount) public nonReentrant {
-        _bet(duelId, side, amount);
-    }
-
-    function betWithPermit(
-        uint256 duelId,
-        uint8 side,
-        uint128 amount,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external nonReentrant {
-        // Best-effort permit: swallow failure so a front-run of the permit
-        // (same owner/spender/nonce) can't DoS the bet — the safeTransferFrom
-        // below still enforces allowance.
-        try IERC20Permit(address(USDC)).permit(msg.sender, address(this), amount, deadline, v, r, s) {} catch {}
-        _bet(duelId, side, amount);
-    }
-
-    function _bet(uint256 duelId, uint8 side, uint128 amount) internal {
-        if (paused) revert IsPaused();
+    function bet(uint256 duelId, uint8 side, uint128 amount) external nonReentrant {
         Duel storage d = duels[duelId];
         if (d.status != Status.Open) revert NotOpen();
         if (block.timestamp >= d.lockTime) revert BettingClosed();
@@ -172,14 +137,12 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         emit DuelLocked(duelId, navA, navB);
     }
 
-    // --- resolve ---
-
     function resolve(uint256 duelId) external nonReentrant {
         Duel storage d = duels[duelId];
         if (d.status != Status.Locked) revert WrongStatus();
         if (block.timestamp < d.expiryTime) revert TooEarly();
 
-        // F2 fix: if either treasury's nav() reverts (e.g. delisted/paused underlying),
+        // If either treasury's nav() reverts (e.g. delisted/paused underlying),
         // void the duel so bettors can reclaim stakes instead of freezing funds forever.
         uint256 navEndA;
         uint256 navEndB;
@@ -222,8 +185,6 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         emit DuelResolved(duelId, winner, navEndA, navEndB);
     }
 
-    // --- claim ---
-
     function claim(uint256 duelId) external nonReentrant {
         Duel storage d = duels[duelId];
         if (d.status != Status.Resolved && d.status != Status.Voided) revert WrongStatus();
@@ -254,7 +215,6 @@ contract DuelMarket is Ownable, ReentrancyGuard {
         emit Claimed(duelId, msg.sender, payout);
     }
 
-    // --- views ---
     function duelCount() external view returns (uint256) {
         return duels.length;
     }

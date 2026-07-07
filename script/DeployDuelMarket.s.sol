@@ -8,7 +8,9 @@ pragma solidity 0.8.28;
 //                       On HyperEVM mainnet: 0xb88339CB7199b77E23DB6E890353E22632Ba630f
 //   DUEL_FEE_RECIPIENT (required) — address that receives the protocol fee
 //                       (immutable; the fee rate itself is a fixed 1% constant).
-//   DUEL_OWNER         (required) — initial Ownable owner (pause control only).
+//
+// The contract is fully permissionless and immutable after deploy — no owner,
+// no pause, no admin function of any kind.
 //
 // Usage:
 //   forge script contracts/script/DeployDuelMarket.s.sol:DeployDuelMarket \
@@ -27,10 +29,9 @@ contract DeployDuelMarket is Script {
     function run() external returns (DuelMarket market) {
         address usdc         = vm.envAddress("USDC_ADDRESS");
         address feeRecipient = vm.envAddress("DUEL_FEE_RECIPIENT");
-        address owner        = vm.envAddress("DUEL_OWNER");
 
         vm.startBroadcast();
-        market = new DuelMarket(usdc, feeRecipient, owner);
+        market = new DuelMarket(usdc, feeRecipient);
         vm.stopBroadcast();
 
         console.log("================================================");
@@ -38,7 +39,6 @@ contract DeployDuelMarket is Script {
         console.log("USDC               :", usdc);
         console.log("Fee recipient      :", feeRecipient);
         console.log("Fee bps (fixed)    :", uint256(market.FEE_BPS()));
-        console.log("Owner              :", owner);
         console.log("================================================");
         console.log("");
         console.log("Next steps:");

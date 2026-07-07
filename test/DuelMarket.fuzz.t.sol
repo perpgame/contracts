@@ -341,7 +341,7 @@ contract DuelMarketFuzzTest is Test {
         usdc   = new MockUSDC();
         tA     = new MockAgentTreasury(NAV_START);
         tB     = new MockAgentTreasury(NAV_START);
-        market = new DuelMarket(address(usdc), FEE_ADDR, address(this));
+        market = new DuelMarket(address(usdc), FEE_ADDR);
     }
 
     /// @dev Create duel, fund alice (A) and bob (B), bet both sides, lock.
