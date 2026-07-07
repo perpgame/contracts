@@ -23,7 +23,7 @@ import {MockUSDC} from "./mocks/MockUSDC.sol";
 contract DuelMarketFuzzTest is Test {
     // navStart fixed for both treasuries in every test scenario
     uint256 constant NAV_START = 1_000e6;
-    uint16  constant FEE_BPS   = 200;     // 2% of losing pool
+    uint16  constant FEE_BPS   = 100;     // 1% of losing pool (mirrors contract FEE_BPS)
     address constant FEE_ADDR  = address(0xFEE5);
 
     // -----------------------------------------------------------------------
@@ -341,7 +341,7 @@ contract DuelMarketFuzzTest is Test {
         usdc   = new MockUSDC();
         tA     = new MockAgentTreasury(NAV_START);
         tB     = new MockAgentTreasury(NAV_START);
-        market = new DuelMarket(address(usdc), FEE_ADDR, FEE_BPS, address(this));
+        market = new DuelMarket(address(usdc), FEE_ADDR, address(this));
     }
 
     /// @dev Create duel, fund alice (A) and bob (B), bet both sides, lock.

@@ -16,7 +16,8 @@ contract DuelMarketTest is Test {
 
     address owner = address(0xA11CE);
     address feeRecipient = address(0xFEE5);
-    uint16 constant FEE_BPS = 200;
+    // Mirrors the contract's fixed FEE_BPS (1%); used only for expected-value math.
+    uint16 constant FEE_BPS = 100;
 
     // betting fixtures — declared here so setUp can reference alicePk
     uint256 alicePk = 0xA11CE1; // distinct from owner (0xA11CE)
@@ -28,7 +29,7 @@ contract DuelMarketTest is Test {
         usdc = new MockUSDC();
         tA = new MockAgentTreasury(1_000e6);
         tB = new MockAgentTreasury(1_000e6);
-        market = new DuelMarket(address(usdc), feeRecipient, FEE_BPS, owner);
+        market = new DuelMarket(address(usdc), feeRecipient, owner);
     }
 
     function _create() internal returns (uint256) {
@@ -251,11 +252,11 @@ contract DuelMarketTest is Test {
         DuelMarket.Duel memory d = market.getDuel(id);
         assertEq(uint8(d.status), uint8(DuelMarket.Status.Resolved));
         assertEq(d.winner, 0);
-        // fee = 2% of losing pool (poolB=100e6) = 2e6
-        assertEq(usdc.balanceOf(feeRecipient), 2e6);
+        // fee = 1% of losing pool (poolB=100e6) = 1e6
+        assertEq(usdc.balanceOf(feeRecipient), 1e6);
         // verify fee came from losing pool (B), not winning pool (A)
-        // contract held 200e6 total, feeRecipient gets 2e6 from poolB
-        assertEq(usdc.balanceOf(address(market)), 198e6);
+        // contract held 200e6 total, feeRecipient gets 1e6 from poolB
+        assertEq(usdc.balanceOf(address(market)), 199e6);
     }
 
     function test_resolve_B_wins_and_takesFee() public {
@@ -272,10 +273,10 @@ contract DuelMarketTest is Test {
         DuelMarket.Duel memory d = market.getDuel(id);
         assertEq(uint8(d.status), uint8(DuelMarket.Status.Resolved));
         assertEq(d.winner, 1);
-        // fee = 2% of losing pool (poolA=100e6) = 2e6
-        assertEq(usdc.balanceOf(feeRecipient), 2e6);
+        // fee = 1% of losing pool (poolA=100e6) = 1e6
+        assertEq(usdc.balanceOf(feeRecipient), 1e6);
         // verify fee came from losing pool (A), not winning pool (B)
-        assertEq(usdc.balanceOf(address(market)), 198e6);
+        assertEq(usdc.balanceOf(address(market)), 199e6);
     }
 
     function test_resolve_tie_noFee() public {
@@ -320,13 +321,13 @@ contract DuelMarketTest is Test {
         vm.warp(market.getDuel(id).expiryTime);
         market.resolve(id);
 
-        // loserPool=100e6, fee=2e6, distributable=98e6. Alice is sole winner.
+        // loserPool=100e6, fee=1e6, distributable=99e6. Alice is sole winner.
         uint256 before = usdc.balanceOf(alice);
         vm.expectEmit(true, true, false, true);
-        emit DuelMarket.Claimed(id, alice, 198e6);
+        emit DuelMarket.Claimed(id, alice, 199e6);
         vm.prank(alice);
         market.claim(id);
-        assertEq(usdc.balanceOf(alice) - before, 100e6 + 98e6); // stake + all winnings
+        assertEq(usdc.balanceOf(alice) - before, 100e6 + 99e6); // stake + all winnings
         assertTrue(market.claimed(id, alice));
     }
 
@@ -337,13 +338,13 @@ contract DuelMarketTest is Test {
         vm.warp(market.getDuel(id).expiryTime);
         market.resolve(id);
 
-        // loserPool=poolA=100e6, fee=2e6, distributable=98e6. Bob is sole winner.
+        // loserPool=poolA=100e6, fee=1e6, distributable=99e6. Bob is sole winner.
         uint256 before = usdc.balanceOf(bob);
         vm.expectEmit(true, true, false, true);
-        emit DuelMarket.Claimed(id, bob, 198e6);
+        emit DuelMarket.Claimed(id, bob, 199e6);
         vm.prank(bob);
         market.claim(id);
-        assertEq(usdc.balanceOf(bob) - before, 100e6 + 98e6); // stake + all winnings
+        assertEq(usdc.balanceOf(bob) - before, 100e6 + 99e6); // stake + all winnings
         assertTrue(market.claimed(id, bob));
     }
 
@@ -410,15 +411,15 @@ contract DuelMarketTest is Test {
         _lockDuel(id);
         tA.setNav(1_200e6); tB.setNav(1_100e6); // A wins
         vm.warp(market.getDuel(id).expiryTime);
-        market.resolve(id); // fee = 2% of poolB(100e6) = 2e6; distributable = 98e6
+        market.resolve(id); // fee = 1% of poolB(100e6) = 1e6; distributable = 99e6
 
         // Exact floor-division payouts:
-        // alice: 100e6 + 100e6*98e6/150e6 = 100e6 + 65_333333 = 165_333333
-        // carol:  50e6 +  50e6*98e6/150e6 =  50e6 + 32_666666 =  82_666666
-        uint256 expectedAlice = uint256(100e6) + (uint256(100e6) * 98e6) / 150e6;
-        uint256 expectedCarol = uint256(50e6) + (uint256(50e6) * 98e6) / 150e6;
-        assertEq(expectedAlice, 165_333333);
-        assertEq(expectedCarol, 82_666666);
+        // alice: 100e6 + 100e6*99e6/150e6 = 100e6 + 66_000000 = 166_000000
+        // carol:  50e6 +  50e6*99e6/150e6 =  50e6 + 33_000000 =  83_000000
+        uint256 expectedAlice = uint256(100e6) + (uint256(100e6) * 99e6) / 150e6;
+        uint256 expectedCarol = uint256(50e6) + (uint256(50e6) * 99e6) / 150e6;
+        assertEq(expectedAlice, 166_000000);
+        assertEq(expectedCarol, 83_000000);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice); market.claim(id);
@@ -434,7 +435,7 @@ contract DuelMarketTest is Test {
         market.claim(id);
 
         // Conservation: winnerPool + (loserPool - fee) - payouts is only dust (<= #winners wei)
-        uint256 distributed = 150e6 + (100e6 - 2e6); // winnerPool + (loserPool - fee) = 248e6
+        uint256 distributed = 150e6 + (100e6 - 1e6); // winnerPool + (loserPool - fee) = 249e6
         uint256 dust = distributed - expectedAlice - expectedCarol;
         assertLe(dust, 2);
     }
@@ -513,7 +514,7 @@ contract DuelMarketTest is Test {
         MockReentrantUSDC rUsdc = new MockReentrantUSDC();
         MockAgentTreasury rA    = new MockAgentTreasury(1_000e6);
         MockAgentTreasury rB    = new MockAgentTreasury(1_000e6);
-        DuelMarket rMarket      = new DuelMarket(address(rUsdc), feeRecipient, FEE_BPS, owner);
+        DuelMarket rMarket      = new DuelMarket(address(rUsdc), feeRecipient, owner);
 
         uint64 lockTime = uint64(block.timestamp + 2 hours);
         uint64 expiry   = lockTime + 1 days;
@@ -575,66 +576,13 @@ contract DuelMarketTest is Test {
     }
 
     // -----------------------------------------------------------------------
-    // F1 — fee snapshot: claim must use the fee bps locked in at resolve time,
-    //      not the live feeBps that may have been changed afterwards.
+    // Fee model: fee is a fixed 1% constant (FEE_BPS). There is no mutable fee
+    // state, so the resolve→claim desync that a snapshot guarded against cannot
+    // occur — resolve() and claim() both read the same compile-time constant.
     // -----------------------------------------------------------------------
 
-    /// @dev RED until feeBpsSnapshot field + claim fix applied.
-    function test_claim_usesFeeSnapshot_notLiveFeeBps() public {
-        // Setup: poolA = poolB = 100e6, resolve at FEE_BPS = 200 (2%)
-        uint256 id = _createAndBetBoth(); // alice side A 100e6, bob side B 100e6
-        _lockDuel(id);
-        tA.setNav(1_200e6); tB.setNav(1_100e6); // A wins
-        vm.warp(market.getDuel(id).expiryTime);
-        market.resolve(id);
-
-        // fee at resolve: 2% of loserPool(100e6) = 2e6 already transferred out
-        uint256 feeRecipientAfterResolve = usdc.balanceOf(feeRecipient);
-        assertEq(feeRecipientAfterResolve, 2e6, "fee from resolve should be 2e6");
-
-        // Now owner changes feeBps to 10% AFTER resolve
-        vm.prank(owner);
-        market.setFeeConfig(1000, feeRecipient);
-
-        // Sole winner alice claims — payout must be computed at snapshot (200 bps), not live (1000 bps)
-        // Expected: stake(100e6) + (stake * (loserPool - fee_at_snapshot)) / poolA
-        //         = 100e6 + (100e6 * (100e6 - 2e6)) / 100e6
-        //         = 100e6 + 98e6 = 198e6
-        uint256 aliceBefore = usdc.balanceOf(alice);
-        vm.prank(alice);
-        market.claim(id); // must not revert
-        uint256 alicePayout = usdc.balanceOf(alice) - aliceBefore;
-        assertEq(alicePayout, 198e6, "payout must use snapshot fee (2%), not live fee (10%)");
-
-        // Contract should be solvent: 200e6 deposited - 2e6 fee out - 198e6 to alice = 0 remaining
-        assertEq(usdc.balanceOf(address(market)), 0, "contract should be solvent after claim");
-
-        // ---- Second direction: resolve at 200, then setFeeConfig(0) — also no insolvency ----
-        // Fresh duel
-        address dave = address(0xDA4E);
-        address eve  = address(0xE4E);
-        uint256 id2 = _create();
-        _fund(dave, 100e6); vm.prank(dave); market.bet(id2, 0, 100e6);
-        _fund(eve, 100e6);  vm.prank(eve);  market.bet(id2, 1, 100e6);
-        _lockDuel(id2);
-        tA.setNav(1_500e6); tB.setNav(1_100e6); // A wins again
-        vm.warp(market.getDuel(id2).expiryTime);
-
-        // reset live feeBps back to 200 for resolve
-        vm.prank(owner);
-        market.setFeeConfig(200, feeRecipient);
-        market.resolve(id2);
-
-        // now set fee to 0 after resolve
-        vm.prank(owner);
-        market.setFeeConfig(0, feeRecipient);
-
-        // dave claims — should use snapshot of 200 bps, not 0
-        uint256 daveBefore = usdc.balanceOf(dave);
-        vm.prank(dave);
-        market.claim(id2);
-        uint256 davePayout = usdc.balanceOf(dave) - daveBefore;
-        assertEq(davePayout, 198e6, "payout must use snapshot fee (2%), not live 0%");
+    function test_fee_isFixedOnePercent() public view {
+        assertEq(market.FEE_BPS(), 100);
     }
 
     // -----------------------------------------------------------------------
