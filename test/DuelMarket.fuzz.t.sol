@@ -68,6 +68,10 @@ contract DuelMarketFuzzTest is Test {
         uint256 totalPot = uint256(aStake) + uint256(bStake);
         uint256 loserPool = uint256(bStake);
         uint256 fee = loserPool * FEE_BPS / 10_000;
+        // Fee splits 50/50 between feeRecipient and the winning treasury (A) —
+        // treasuryShare floors, platformShare takes the remainder (mirrors resolve()).
+        uint256 treasuryShare = fee / 2;
+        uint256 platformShare = fee - treasuryShare;
 
         // Invariant 1: after resolve, market holds totalPot - fee (fee already sent)
         assertEq(
@@ -77,8 +81,13 @@ contract DuelMarketFuzzTest is Test {
         );
         assertEq(
             usdc.balanceOf(FEE_ADDR),
-            fee,
-            "feeRecipient balance != fee"
+            platformShare,
+            "feeRecipient balance != platform share"
+        );
+        assertEq(
+            usdc.balanceOf(address(tA)),
+            treasuryShare,
+            "winning treasury balance != treasury share"
         );
 
         // Invariant 2: alice can claim without revert (solvency)
@@ -137,6 +146,9 @@ contract DuelMarketFuzzTest is Test {
         uint256 loserPool   = uint256(aStake);
         uint256 fee         = loserPool * FEE_BPS / 10_000;
         uint256 distributable = loserPool - fee;
+        // Fee splits 50/50 between feeRecipient and the winning treasury (B).
+        uint256 treasuryShare = fee / 2;
+        uint256 platformShare = fee - treasuryShare;
 
         // Invariant 1: post-resolve balance
         assertEq(
@@ -144,7 +156,8 @@ contract DuelMarketFuzzTest is Test {
             totalPot - fee,
             "market balance after resolve != totalPot - fee (B wins)"
         );
-        assertEq(usdc.balanceOf(FEE_ADDR), fee, "feeRecipient balance != fee (B wins)");
+        assertEq(usdc.balanceOf(FEE_ADDR), platformShare, "feeRecipient balance != platform share (B wins)");
+        assertEq(usdc.balanceOf(address(tB)), treasuryShare, "winning treasury balance != treasury share (B wins)");
 
         // Invariant 2: bob can claim without revert (solvency)
         address bob = address(0xB0B);

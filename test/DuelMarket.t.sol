@@ -71,8 +71,17 @@ contract DuelMarketTest is Test {
 
     function test_createDuel_reverts_durationTooLong() public {
         uint64 lock = uint64(block.timestamp + 2 hours);
+        // Read the constant into a local first — calling it inline inside the
+        // expectRevert-guarded expression would itself be "the next call" and
+        // falsely satisfy expectRevert before createDuel ever runs.
+        uint64 maxDuration = market.MAX_DURATION();
+        // Right at the cap succeeds...
+        market.createDuel(address(tA), address(tB), lock, lock + maxDuration);
+        // ...one second past it reverts. Reads the constant off the contract
+        // rather than hardcoding a day count, so this stays correct if
+        // MAX_DURATION ever changes again.
         vm.expectRevert(DuelMarket.BadTiming.selector);
-        market.createDuel(address(tA), address(tB), lock, lock + 91 days);
+        market.createDuel(address(tA), address(tB), lock, lock + maxDuration + 1);
     }
 
     // --- betting helpers ---
@@ -205,10 +214,12 @@ contract DuelMarketTest is Test {
         DuelMarket.Duel memory d = market.getDuel(id);
         assertEq(uint8(d.status), uint8(DuelMarket.Status.Resolved));
         assertEq(d.winner, 0);
-        // fee = 1% of losing pool (poolB=100e6) = 1e6
-        assertEq(usdc.balanceOf(feeRecipient), 1e6);
+        // fee = 1% of losing pool (poolB=100e6) = 1e6, split 50/50: half to
+        // feeRecipient, half to the winning treasury (A).
+        assertEq(usdc.balanceOf(feeRecipient), 0.5e6);
+        assertEq(usdc.balanceOf(address(tA)), 0.5e6);
         // verify fee came from losing pool (B), not winning pool (A)
-        // contract held 200e6 total, feeRecipient gets 1e6 from poolB
+        // contract held 200e6 total, 1e6 fee left the contract entirely
         assertEq(usdc.balanceOf(address(market)), 199e6);
     }
 
@@ -226,8 +237,10 @@ contract DuelMarketTest is Test {
         DuelMarket.Duel memory d = market.getDuel(id);
         assertEq(uint8(d.status), uint8(DuelMarket.Status.Resolved));
         assertEq(d.winner, 1);
-        // fee = 1% of losing pool (poolA=100e6) = 1e6
-        assertEq(usdc.balanceOf(feeRecipient), 1e6);
+        // fee = 1% of losing pool (poolA=100e6) = 1e6, split 50/50: half to
+        // feeRecipient, half to the winning treasury (B).
+        assertEq(usdc.balanceOf(feeRecipient), 0.5e6);
+        assertEq(usdc.balanceOf(address(tB)), 0.5e6);
         // verify fee came from losing pool (A), not winning pool (B)
         assertEq(usdc.balanceOf(address(market)), 199e6);
     }

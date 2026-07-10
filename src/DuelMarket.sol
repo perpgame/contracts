@@ -11,8 +11,7 @@ import {IAgentTreasury} from "./interfaces/IAgentTreasury.sol";
 /// @notice Trustless resolution: winner = higher treasury PnL% over [lock, expiry],
 ///         read directly from AgentTreasury.nav(). No oracle.
 /// @dev Fully permissionless and immutable: no owner, no pause, no admin function
-///      of any kind. The protocol fee is a fixed 1% of the losing pool (FEE_BPS),
-///      paid to an immutable feeRecipient set at deploy.
+///      of any kind. The protocol fee is a fixed 1% of the losing pool (FEE_BPS)
 contract DuelMarket is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -36,10 +35,10 @@ contract DuelMarket is ReentrancyGuard {
     IERC20  public immutable USDC;
     address public immutable feeRecipient;
 
-    uint16  public constant FEE_BPS        = 100;     // fixed 1% of the losing pool
+    uint16  public constant FEE_BPS        = 100;
     uint64  public constant MIN_BET_WINDOW = 1 hours; // lock must be >= now + this
     uint64  public constant MIN_DURATION   = 1 hours; // expiry >= lock + this
-    uint64  public constant MAX_DURATION   = 90 days; // expiry <= lock + this
+    uint64  public constant MAX_DURATION   = 30 days; // expiry <= lock + this
     uint128 public constant MIN_BET        = 1e6;     // 1 USDC
 
     Duel[] public duels;
@@ -112,8 +111,6 @@ contract DuelMarket is ReentrancyGuard {
         emit BetPlaced(duelId, msg.sender, side, amount);
     }
 
-    // --- lock ---
-
     function lock(uint256 duelId) external nonReentrant {
         Duel storage d = duels[duelId];
         if (d.status != Status.Open) revert WrongStatus();
@@ -180,7 +177,13 @@ contract DuelMarket is ReentrancyGuard {
         if (winner != 2) {
             uint256 loserPool = winner == 0 ? uint256(d.poolB) : uint256(d.poolA);
             uint256 fee = loserPool * FEE_BPS / 10_000;
-            if (fee > 0) USDC.safeTransfer(feeRecipient, fee);
+            if (fee > 0) {
+                uint256 treasuryShare = fee / 2;
+                uint256 platformShare = fee - treasuryShare;
+                address winningTreasury = winner == 0 ? d.treasuryA : d.treasuryB;
+                USDC.safeTransfer(feeRecipient, platformShare);
+                USDC.safeTransfer(winningTreasury, treasuryShare);
+            }
         }
         emit DuelResolved(duelId, winner, navEndA, navEndB);
     }
