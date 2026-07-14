@@ -42,7 +42,7 @@ contract DuelMarketFuzzTest is Test {
         uint128 bStake,
         uint64  navEndARaw
     ) public {
-        aStake    = uint128(bound(aStake,    1e6, 1e15));
+        aStake    = uint128(bound(aStake,    5e6, 1e15)); // creator seed >= MIN_CREATOR_STAKE
         bStake    = uint128(bound(bStake,    1e6, 1e15));
         // navEndA must produce a strictly higher PnL% than navEndB which stays at NAV_START
         // pnlB = 0 %, so any navEndA > NAV_START means A wins
@@ -122,7 +122,7 @@ contract DuelMarketFuzzTest is Test {
         uint128 bStake,
         uint64  navEndBRaw
     ) public {
-        aStake    = uint128(bound(aStake,    1e6, 1e15));
+        aStake    = uint128(bound(aStake,    5e6, 1e15)); // creator seed >= MIN_CREATOR_STAKE
         bStake    = uint128(bound(bStake,    1e6, 1e15));
         // navEndB must produce strictly higher PnL% than navEndA (stays at NAV_START)
         uint256 navEndB = bound(navEndBRaw, NAV_START + 1, 1e15);
@@ -191,7 +191,7 @@ contract DuelMarketFuzzTest is Test {
         uint128 bStake,
         uint64  tieNavRaw
     ) public {
-        aStake = uint128(bound(aStake, 1e6, 1e15));
+        aStake = uint128(bound(aStake, 5e6, 1e15)); // creator seed >= MIN_CREATOR_STAKE
         bStake = uint128(bound(bStake, 1e6, 1e15));
         // Fuzz the shared end-nav across gain / flat / loss relative to NAV_START.
         // Both treasuries get the SAME value => identical PnL% => tie regardless.
@@ -264,7 +264,7 @@ contract DuelMarketFuzzTest is Test {
         uint128 bStake,
         uint64  navEndARaw
     ) public {
-        aliceStake = uint128(bound(aliceStake, 1e6, 1e14));
+        aliceStake = uint128(bound(aliceStake, 5e6, 1e14)); // creator seed >= MIN_CREATOR_STAKE
         carolStake = uint128(bound(carolStake, 1e6, 1e14));
         bStake     = uint128(bound(bStake,     1e6, 1e15));
         uint256 navEndA = bound(navEndARaw, NAV_START + 1, 1e15);
@@ -274,7 +274,6 @@ contract DuelMarketFuzzTest is Test {
 
         uint64 lockTime = uint64(block.timestamp + 2 hours);
         uint64 expiry   = lockTime + 1 days;
-        uint256 id = market.createDuel(address(tA), address(tB), lockTime, expiry);
 
         address alice = address(0xA1);
         address carol = address(0xCA401);
@@ -284,7 +283,10 @@ contract DuelMarketFuzzTest is Test {
         usdc.mint(carol, carolStake); vm.prank(carol); usdc.approve(address(market), carolStake);
         usdc.mint(bob,   bStake);     vm.prank(bob);   usdc.approve(address(market), bStake);
 
-        vm.prank(alice); market.bet(id, 0, aliceStake);
+        // Alice's side-A stake doubles as the mandatory creator seed.
+        vm.prank(alice);
+        uint256 id = market.createDuel(address(tA), address(tB), lockTime, expiry, 0, aliceStake);
+
         vm.prank(carol); market.bet(id, 0, carolStake);
         vm.prank(bob);   market.bet(id, 1, bStake);
 
@@ -369,7 +371,6 @@ contract DuelMarketFuzzTest is Test {
     ) internal returns (uint256 id) {
         uint64 lockTime = uint64(block.timestamp + 2 hours);
         uint64 expiry   = lockTime + 1 days;
-        id = market.createDuel(address(tA), address(tB), lockTime, expiry);
 
         address alice = address(0xA1);
         address bob   = address(0xB0B);
@@ -377,7 +378,10 @@ contract DuelMarketFuzzTest is Test {
         usdc.mint(alice, aStake); vm.prank(alice); usdc.approve(address(market), aStake);
         usdc.mint(bob,   bStake); vm.prank(bob);   usdc.approve(address(market), bStake);
 
-        vm.prank(alice); market.bet(id, 0, aStake);
+        // Alice's side-A stake doubles as the mandatory creator seed.
+        vm.prank(alice);
+        id = market.createDuel(address(tA), address(tB), lockTime, expiry, 0, aStake);
+
         vm.prank(bob);   market.bet(id, 1, bStake);
 
         vm.warp(lockTime);

@@ -19,8 +19,11 @@ pragma solidity 0.8.28;
 //     --private-key "$DEPLOYER_PRIVATE_KEY"
 //
 // After deploy:
-//   - Wire the deployed address into Rails as DUEL_MARKET_ADDRESS.
-//   - Update web/src/lib/contracts/addresses.ts (DUEL_MARKET).
+//   - Set DUEL_MARKET_ADDRESS=<market> in Rails' env. That's the only wiring
+//     needed: Onchain::DuelWriter, Indexer::DuelSyncJob, and GET /config
+//     (duel_market_address) all read this one var; the frontend picks it up
+//     dynamically from /config (useDuelMarketAddress), not a static address
+//     constant — there is no DUEL_MARKET entry in addresses.ts to update.
 
 import {Script, console} from "forge-std/Script.sol";
 import {DuelMarket} from "../src/DuelMarket.sol";

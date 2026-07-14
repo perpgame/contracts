@@ -28,10 +28,15 @@ contract DuelMarketTest is Test {
         market = new DuelMarket(address(usdc), feeRecipient);
     }
 
+    // The creator seed IS alice's side-A stake (100 USDC) — folding what used
+    // to be her separate first bet() into createDuel keeps every downstream
+    // pool/fee/payout number in this suite identical to the pre-seed version.
     function _create() internal returns (uint256) {
         uint64 lock = uint64(block.timestamp + 2 hours);
         uint64 expiry = lock + 1 days;
-        return market.createDuel(address(tA), address(tB), lock, expiry);
+        _fund(alice, 100e6);
+        vm.prank(alice);
+        return market.createDuel(address(tA), address(tB), lock, expiry, 0, 100e6);
     }
 
     function test_createDuel_succeeds_and_indexes() public {
@@ -41,32 +46,64 @@ contract DuelMarketTest is Test {
         DuelMarket.Duel memory d = market.getDuel(id);
         assertEq(d.treasuryA, address(tA));
         assertEq(uint8(d.status), uint8(DuelMarket.Status.Open));
+        // The creator seed is booked as an ordinary side-A stake.
+        assertEq(d.poolA, 100e6);
+        assertEq(market.stakeA(id, alice), 100e6);
+        assertEq(usdc.balanceOf(address(market)), 100e6);
+    }
+
+    function test_createDuel_emitsSeedBet() public {
+        uint64 lock = uint64(block.timestamp + 2 hours);
+        _fund(alice, 5e6);
+        vm.expectEmit(true, true, false, true);
+        emit DuelMarket.BetPlaced(0, alice, 1, 5e6);
+        vm.prank(alice);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days, 1, 5e6);
+        DuelMarket.Duel memory d = market.getDuel(0);
+        assertEq(d.poolB, 5e6);
+        assertEq(market.stakeB(0, alice), 5e6);
+    }
+
+    function test_createDuel_reverts_seedBelowMin() public {
+        uint64 lock = uint64(block.timestamp + 2 hours);
+        _fund(alice, 5e6);
+        vm.prank(alice);
+        vm.expectRevert(DuelMarket.BelowCreatorStake.selector);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days, 0, 5e6 - 1);
+    }
+
+    function test_createDuel_reverts_seedBadSide() public {
+        uint64 lock = uint64(block.timestamp + 2 hours);
+        _fund(alice, 5e6);
+        vm.prank(alice);
+        vm.expectRevert(DuelMarket.BadSide.selector);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days, 2, 5e6);
     }
 
     function test_createDuel_reverts_sameTreasury() public {
         uint64 lock = uint64(block.timestamp + 2 hours);
         vm.expectRevert(DuelMarket.SameTreasury.selector);
-        market.createDuel(address(tA), address(tA), lock, lock + 1 days);
+        market.createDuel(address(tA), address(tA), lock, lock + 1 days, 0, 5e6);
     }
 
     function test_createDuel_reverts_zeroNav() public {
         tB.setNav(0);
         uint64 lock = uint64(block.timestamp + 2 hours);
         vm.expectRevert(DuelMarket.InvalidTreasury.selector);
-        market.createDuel(address(tA), address(tB), lock, lock + 1 days);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days, 0, 5e6);
     }
 
     function test_createDuel_reverts_zeroNavA() public {
         tA.setNav(0);
         uint64 lock = uint64(block.timestamp + 2 hours);
         vm.expectRevert(DuelMarket.InvalidTreasury.selector);
-        market.createDuel(address(tA), address(tB), lock, lock + 1 days);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days, 0, 5e6);
     }
 
     function test_createDuel_reverts_lockTooSoon() public {
         uint64 lock = uint64(block.timestamp + 10 minutes); // < MIN_BET_WINDOW
         vm.expectRevert(DuelMarket.BadTiming.selector);
-        market.createDuel(address(tA), address(tB), lock, lock + 1 days);
+        market.createDuel(address(tA), address(tB), lock, lock + 1 days, 0, 5e6);
     }
 
     function test_createDuel_reverts_durationTooLong() public {
@@ -76,12 +113,15 @@ contract DuelMarketTest is Test {
         // falsely satisfy expectRevert before createDuel ever runs.
         uint64 maxDuration = market.MAX_DURATION();
         // Right at the cap succeeds...
-        market.createDuel(address(tA), address(tB), lock, lock + maxDuration);
-        // ...one second past it reverts. Reads the constant off the contract
-        // rather than hardcoding a day count, so this stays correct if
-        // MAX_DURATION ever changes again.
+        _fund(alice, 5e6);
+        vm.prank(alice);
+        market.createDuel(address(tA), address(tB), lock, lock + maxDuration, 0, 5e6);
+        // ...one second past it reverts (before the seed transfer, so no
+        // funding is needed). Reads the constant off the contract rather than
+        // hardcoding a day count, so this stays correct if MAX_DURATION ever
+        // changes again.
         vm.expectRevert(DuelMarket.BadTiming.selector);
-        market.createDuel(address(tA), address(tB), lock, lock + maxDuration + 1);
+        market.createDuel(address(tA), address(tB), lock, lock + maxDuration + 1, 0, 5e6);
     }
 
     // --- betting helpers ---
@@ -95,15 +135,15 @@ contract DuelMarketTest is Test {
     // --- bet tests ---
 
     function test_bet_creditsPoolAndStake() public {
-        uint256 id = _create();
-        _fund(alice, 100e6);
-        vm.prank(alice);
-        market.bet(id, 0, 100e6);
+        uint256 id = _create(); // alice seeded 100e6 on A at creation
+        _fund(bob, 100e6);
+        vm.prank(bob);
+        market.bet(id, 1, 100e6);
 
         DuelMarket.Duel memory d = market.getDuel(id);
-        assertEq(d.poolA, 100e6);
-        assertEq(market.stakeA(id, alice), 100e6);
-        assertEq(usdc.balanceOf(address(market)), 100e6);
+        assertEq(d.poolB, 100e6);
+        assertEq(market.stakeB(id, bob), 100e6);
+        assertEq(usdc.balanceOf(address(market)), 200e6); // seed + bob's bet
     }
 
     function test_bet_reverts_belowMin() public {
@@ -135,8 +175,7 @@ contract DuelMarketTest is Test {
     // --- lock helpers ---
 
     function _createAndBetBoth() internal returns (uint256 id) {
-        id = _create();
-        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6);
+        id = _create(); // alice already staked 100e6 on A via the creator seed
         _fund(bob, 100e6);   vm.prank(bob);   market.bet(id, 1, 100e6);
     }
 
@@ -156,8 +195,7 @@ contract DuelMarketTest is Test {
     }
 
     function test_lock_voidsWhenOneSided() public {
-        uint256 id = _create();
-        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // only A
+        uint256 id = _create(); // only the creator seed on A — no B bets
         DuelMarket.Duel memory d0 = market.getDuel(id);
         vm.warp(d0.lockTime);
         vm.expectEmit(true, false, false, false);
@@ -338,8 +376,7 @@ contract DuelMarketTest is Test {
     }
 
     function test_claim_voidRefundsStake() public {
-        uint256 id = _create();
-        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // one-sided
+        uint256 id = _create(); // one-sided: just the creator seed on A
         _lockDuel(id); // -> Voided
         uint256 before = usdc.balanceOf(alice);
         vm.prank(alice); market.claim(id);
@@ -369,8 +406,7 @@ contract DuelMarketTest is Test {
 
     function test_claim_multipleWinnersProRata() public {
         address carol = address(0xCA401);
-        uint256 id = _create();
-        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // A
+        uint256 id = _create(); // alice's creator seed: 100e6 on A
         _fund(carol, 50e6);  vm.prank(carol); market.bet(id, 0, 50e6);  // A
         _fund(bob, 100e6);   vm.prank(bob);   market.bet(id, 1, 100e6); // B
         // poolA = 150e6, poolB = 100e6
@@ -407,8 +443,7 @@ contract DuelMarketTest is Test {
     }
 
     function test_claim_voidNonParticipantReverts() public {
-        uint256 id = _create();
-        _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6); // one-sided
+        uint256 id = _create(); // one-sided: just the creator seed on A
         _lockDuel(id); // -> Voided
         // bob never staked on this duel
         vm.prank(bob);
@@ -449,7 +484,10 @@ contract DuelMarketTest is Test {
 
         uint64 lockTime = uint64(block.timestamp + 2 hours);
         uint64 expiry   = lockTime + 1 days;
-        uint256 id      = rMarket.createDuel(address(rA), address(rB), lockTime, expiry);
+        // The test contract itself seeds the mandatory creator stake (side A).
+        rUsdc.mint(address(this), 5e6);
+        rUsdc.approve(address(rMarket), 5e6);
+        uint256 id = rMarket.createDuel(address(rA), address(rB), lockTime, expiry, 0, 5e6);
 
         // Deploy the reentrant receiver contract and fund it via the token
         ReentrantClaimReceiver attacker = new ReentrantClaimReceiver(rMarket, id);
@@ -527,7 +565,10 @@ contract DuelMarketTest is Test {
 
         uint64 lockTime = uint64(block.timestamp + 2 hours);
         uint64 expiry   = lockTime + 1 days;
-        uint256 id = market.createDuel(address(tA), address(rtB), lockTime, expiry);
+        // The test contract seeds the mandatory creator stake (side A).
+        usdc.mint(address(this), 5e6);
+        usdc.approve(address(market), 5e6);
+        uint256 id = market.createDuel(address(tA), address(rtB), lockTime, expiry, 0, 5e6);
 
         _fund(alice, 100e6); vm.prank(alice); market.bet(id, 0, 100e6);
         _fund(bob, 100e6);   vm.prank(bob);   market.bet(id, 1, 100e6);
@@ -559,6 +600,9 @@ contract DuelMarketTest is Test {
         vm.prank(bob);
         market.claim(id);
         assertEq(usdc.balanceOf(bob) - bobBefore, 100e6, "bob stake refund");
+
+        // The creator (this test contract) reclaims its 5e6 seed too.
+        market.claim(id);
 
         // Contract fully drained, no fee taken on void
         assertEq(usdc.balanceOf(address(market)), 0, "contract drained after void refunds");

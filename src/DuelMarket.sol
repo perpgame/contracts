@@ -35,11 +35,12 @@ contract DuelMarket is ReentrancyGuard {
     IERC20  public immutable USDC;
     address public immutable feeRecipient;
 
-    uint16  public constant FEE_BPS        = 100;
-    uint64  public constant MIN_BET_WINDOW = 1 hours; // lock must be >= now + this
-    uint64  public constant MIN_DURATION   = 1 hours; // expiry >= lock + this
-    uint64  public constant MAX_DURATION   = 30 days; // expiry <= lock + this
-    uint128 public constant MIN_BET        = 1e6;     // 1 USDC
+    uint16  public constant FEE_BPS           = 100;
+    uint64  public constant MIN_BET_WINDOW    = 1 hours; // lock must be >= now + this
+    uint64  public constant MIN_DURATION      = 1 hours; // expiry >= lock + this
+    uint64  public constant MAX_DURATION      = 30 days; // expiry <= lock + this
+    uint128 public constant MIN_BET           = 1e6;     // 1 USDC
+    uint128 public constant MIN_CREATOR_STAKE = 5e6;     // 5 USDC — creator must seed one side
 
     Duel[] public duels;
     mapping(uint256 => mapping(address => uint128)) public stakeA;
@@ -59,6 +60,7 @@ contract DuelMarket is ReentrancyGuard {
     error NotOpen();
     error BettingClosed();
     error BelowMinBet();
+    error BelowCreatorStake();
     error BadSide();
     error TooEarly();
     error WrongStatus();
@@ -70,16 +72,28 @@ contract DuelMarket is ReentrancyGuard {
         feeRecipient = feeRecipient_;
     }
 
-    function createDuel(address treasuryA, address treasuryB, uint64 lockTime, uint64 expiryTime)
-        external
-        returns (uint256 duelId)
-    {
+    /// @notice Creates a duel and seeds it with the creator's own opening bet.
+    /// @dev The seed (>= MIN_CREATOR_STAKE) is a regular stake on `seedSide`,
+    ///      booked and claimable exactly like any later bet() — it exists so
+    ///      every open duel starts with real skin in the game instead of an
+    ///      empty market. Emits BetPlaced after DuelCreated so indexers see
+    ///      the seed as an ordinary first bet.
+    function createDuel(
+        address treasuryA,
+        address treasuryB,
+        uint64 lockTime,
+        uint64 expiryTime,
+        uint8 seedSide,
+        uint128 seedAmount
+    ) external nonReentrant returns (uint256 duelId) {
         if (treasuryA == treasuryB) revert SameTreasury();
         if (IAgentTreasury(treasuryA).nav() == 0) revert InvalidTreasury();
         if (IAgentTreasury(treasuryB).nav() == 0) revert InvalidTreasury();
         if (lockTime < block.timestamp + MIN_BET_WINDOW) revert BadTiming();
         if (expiryTime < lockTime + MIN_DURATION) revert BadTiming();
         if (expiryTime > lockTime + MAX_DURATION) revert BadTiming();
+        if (seedSide > 1) revert BadSide();
+        if (seedAmount < MIN_CREATOR_STAKE) revert BelowCreatorStake();
 
         duelId = duels.length;
         Duel storage d = duels.push();
@@ -90,6 +104,16 @@ contract DuelMarket is ReentrancyGuard {
         d.status = Status.Open;
 
         emit DuelCreated(duelId, treasuryA, treasuryB, lockTime, expiryTime, msg.sender);
+
+        USDC.safeTransferFrom(msg.sender, address(this), seedAmount);
+        if (seedSide == 0) {
+            stakeA[duelId][msg.sender] = seedAmount;
+            d.poolA = seedAmount;
+        } else {
+            stakeB[duelId][msg.sender] = seedAmount;
+            d.poolB = seedAmount;
+        }
+        emit BetPlaced(duelId, msg.sender, seedSide, seedAmount);
     }
 
 
