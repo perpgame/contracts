@@ -311,7 +311,32 @@ contract StockTreasury is Initializable, ReentrancyGuard {
 
         uint256 idle = STABLE.balanceOf(address(this));
 
-        (uint256[] memory tokenValues, uint256 totalTokenValue) = _heldTokenValues();
+        // Tolerant per-leg valuation. A leg whose oracle mark reverts (stale or
+        // invalid feed — a weekend/holiday/corporate-action freeze) must NOT
+        // brick the whole exit; the strict library valuation used by nav() does
+        // exactly that, so exits can't route through it (audit HIGH-3). Here we
+        // catch the revert, mark the leg unpriceable, and settle it in-kind
+        // below so a holder can always redeem their pro-rata assets, oracle or
+        // not. Priceable legs and the total exclude unpriceable ones.
+        uint256[] memory tokenValues = new uint256[](n);
+        bool[] memory priced = new bool[](n);
+        uint256 totalTokenValue = 0;
+        for (uint256 i = 0; i < n; i++) {
+            address t = assets[symbols[i]].token;
+            uint256 b = IERC20(t).balanceOf(address(this));
+            if (b == 0) {
+                priced[i] = true; // nothing to value/settle
+                continue;
+            }
+            // slither-disable-next-line calls-loop
+            try REGISTRY.valueOf(t, b) returns (uint256 v) {
+                tokenValues[i] = v;
+                totalTokenValue += v;
+                priced[i] = true;
+            } catch {
+                // leave priced[i] == false → settled in-kind below
+            }
+        }
 
         uint256 navTotal = idle + totalTokenValue;
         uint256 notional = (navTotal * agentShares) / totalShares;
@@ -328,43 +353,57 @@ contract StockTreasury is Initializable, ReentrancyGuard {
         uint256 idlePaid = (idle * agentShares) / totalShares;
         if (idlePaid > 0) _consumeStable(idlePaid, idle);
 
-        // 2. Cover the deficit per leg: swap the seller's pro-rata slice to
-        //    stable on Uniswap. If the swap fails (token paused, pool gone, …)
-        //    we catch it. With `returnTokens` set we hand the seller that leg's
-        //    raw stock tokens to convert later; with `returnTokens` false the
-        //    seller wants stable only, so we simply skip the leg — its tokens
-        //    stay in the treasury and the seller is paid only what swapped.
-        //    Swapped stable is forwarded once after the loop.
+        // 2. Cover the deficit per leg. Priceable legs: swap the seller's
+        //    pro-rata slice to stable on Uniswap; on swap failure (token paused,
+        //    pool gone, …) we catch and, with `returnTokens`, hand over the raw
+        //    tokens (else skip — stable-only sellers leave the leg behind).
+        //    Unpriceable legs: no swap is possible without a mark, so with
+        //    `returnTokens` we hand the seller their pure pro-rata raw slice
+        //    (oracle-free); stable-only sellers skip the leg. `anyInKind` records
+        //    whether any raw tokens were handed out, which relaxes the realized-
+        //    stable floor below.
         uint256 remaining = notional - idlePaid;
         uint256 swapped = 0;
-        if (remaining > 0) {
-            for (uint256 i = 0; i < n; i++) {
-                if (tokenValues[i] == 0) continue;
-                address token = assets[symbols[i]].token;
-                uint256 bal = IERC20(token).balanceOf(address(this));
-                uint256 tokenOut = (bal * remaining) / totalTokenValue;
-                if (tokenOut == 0) continue;
-                IERC20(token).forceApprove(address(SWAP_ROUTER), tokenOut);
-                // slither-disable-next-line calls-loop,reentrancy-events
-                try SWAP_ROUTER.exactInputSingle(
-                    ISwapRouter02.ExactInputSingleParams({
-                        tokenIn: token,
-                        tokenOut: address(STABLE),
-                        fee: REGISTRY.poolFee(token),
-                        recipient: address(this),
-                        amountIn: tokenOut,
-                        amountOutMinimum: 0,
-                        sqrtPriceLimitX96: 0
-                    })
-                ) returns (uint256 got) {
-                    swapped += got;
-                } catch {
-                    IERC20(token).forceApprove(address(SWAP_ROUTER), 0);
-                    if (returnTokens) {
-                        uint256 tokenFee = (tokenOut * feeBps()) / BPS_DENOM;
-                        if (tokenFee > 0) IERC20(token).safeTransfer(feeRecipient(), tokenFee);
-                        IERC20(token).safeTransfer(recipient, tokenOut - tokenFee);
-                    }
+        bool anyInKind = false;
+        for (uint256 i = 0; i < n; i++) {
+            address token = assets[symbols[i]].token;
+
+            if (!priced[i]) {
+                if (!returnTokens) continue;
+                uint256 rawSlice = (IERC20(token).balanceOf(address(this)) * agentShares) / totalShares;
+                if (rawSlice == 0) continue;
+                anyInKind = true;
+                uint256 rawFee = (rawSlice * feeBps()) / BPS_DENOM;
+                if (rawFee > 0) IERC20(token).safeTransfer(feeRecipient(), rawFee);
+                IERC20(token).safeTransfer(recipient, rawSlice - rawFee);
+                continue;
+            }
+
+            if (tokenValues[i] == 0 || remaining == 0 || totalTokenValue == 0) continue;
+            uint256 bal = IERC20(token).balanceOf(address(this));
+            uint256 tokenOut = (bal * remaining) / totalTokenValue;
+            if (tokenOut == 0) continue;
+            IERC20(token).forceApprove(address(SWAP_ROUTER), tokenOut);
+            // slither-disable-next-line calls-loop,reentrancy-events
+            try SWAP_ROUTER.exactInputSingle(
+                ISwapRouter02.ExactInputSingleParams({
+                    tokenIn: token,
+                    tokenOut: address(STABLE),
+                    fee: REGISTRY.poolFee(token),
+                    recipient: address(this),
+                    amountIn: tokenOut,
+                    amountOutMinimum: 0,
+                    sqrtPriceLimitX96: 0
+                })
+            ) returns (uint256 got) {
+                swapped += got;
+            } catch {
+                IERC20(token).forceApprove(address(SWAP_ROUTER), 0);
+                if (returnTokens) {
+                    anyInKind = true;
+                    uint256 tokenFee = (tokenOut * feeBps()) / BPS_DENOM;
+                    if (tokenFee > 0) IERC20(token).safeTransfer(feeRecipient(), tokenFee);
+                    IERC20(token).safeTransfer(recipient, tokenOut - tokenFee);
                 }
             }
         }
@@ -372,7 +411,15 @@ contract StockTreasury is Initializable, ReentrancyGuard {
         uint256 fee = (stableOut * feeBps()) / BPS_DENOM;
         uint256 netOut = stableOut - fee;
 
-        if (!returnTokens && netOut < minStableOut) revert SlippageExceeded();
+        // Realized-stable slippage floor. The gross-notional check above is an
+        // ORACLE mark; the swaps realize the LIVE pool price, so a sandwich can
+        // clear the oracle check yet pay out far less. Enforce the floor on the
+        // amount actually received (audit HIGH-1: previously gated on
+        // !returnTokens, leaving returnTokens=true swaps unprotected). When any
+        // leg was returned in-kind, the stable portion is legitimately below
+        // minStableOut, so the oracle-notional floor above is the binding check
+        // instead and this one is relaxed.
+        if (netOut < minStableOut && !anyInKind) revert SlippageExceeded();
 
         if (fee > 0) STABLE.safeTransfer(feeRecipient(), fee);
         if (netOut > 0) STABLE.safeTransfer(recipient, netOut);
@@ -641,10 +688,6 @@ contract StockTreasury is Initializable, ReentrancyGuard {
         emit RebalancerChanged(rebalancer, msg.sender);
         rebalancer = msg.sender;
         pendingRebalancer = address(0);
-    }
-
-    function _heldTokenValues() internal view returns (uint256[] memory tokenValues, uint256 totalTokenValue) {
-        return StockTreasuryValuation.heldTokenValues(symbols, assets, REGISTRY);
     }
 
     /// Sum of all stock tokens held (at Chainlink marks) + idle stable

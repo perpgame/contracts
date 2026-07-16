@@ -1300,16 +1300,23 @@ contract StockTreasuryTest is Test {
         vm.stopPrank();
     }
 
-    function test_Sell_RevertsOnStaleFeed() public {
+    // A stale feed must NOT trap sellers (audit HIGH-3). With returnTokens=true
+    // an unpriceable leg is settled in-kind so a holder can always exit, even
+    // while nav()/buy/rebalance stay frozen (see the sibling revert tests).
+    function test_Sell_StaleFeed_SettlesInKind() public {
         (, , , uint256 updatedAt,) = feedA.latestRoundData();
         vm.warp(updatedAt + registry.maxPriceAge() + 1);
 
         uint256 aliceAgent = curve.balanceOf(alice);
+        uint256 aBefore = tokenA.balanceOf(alice);
+        uint256 bBefore = tokenB.balanceOf(alice);
+
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(StockTokenRegistry.StalePrice.selector, address(tokenA), updatedAt)
-        );
         curve.sell(aliceAgent, alice, 0, true, block.timestamp);
+
+        assertEq(curve.balanceOf(alice), 0, "shares burned");
+        assertGt(tokenA.balanceOf(alice) - aBefore, 0, "AAPL returned in-kind");
+        assertGt(tokenB.balanceOf(alice) - bBefore, 0, "TSLA returned in-kind");
     }
 
     function test_ExecuteRebalanceStep_RevertsOnStaleFeed() public {
