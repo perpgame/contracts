@@ -59,10 +59,11 @@ import {StockTreasuryFactory} from "../src/StockTreasuryFactory.sol";
 import {StockTokenRegistry} from "../src/StockTokenRegistry.sol";
 
 contract DeployStockTreasuryFactory is Script {
+    /// Defaults are Robinhood Chain MAINNET; override via env for testnet.
     /// USDG (Paxos Global Dollar), 6 decimals, EIP-2612 permit.
-    address constant STABLE = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
+    address constant DEFAULT_STABLE = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
     /// Uniswap v3 SwapRouter02 on Robinhood Chain.
-    address constant SWAP_ROUTER = 0xCaf681a66D020601342297493863E78C959E5cb2;
+    address constant DEFAULT_SWAP_ROUTER = 0xCaf681a66D020601342297493863E78C959E5cb2;
 
     uint256 constant DEFAULT_TIMELOCK_DELAY = 48 hours;
 
@@ -70,6 +71,10 @@ contract DeployStockTreasuryFactory is Script {
         address safe = vm.envOr("SAFE_MULTISIG", address(0));
         uint256 delay = vm.envOr("TIMELOCK_DELAY_SECONDS", DEFAULT_TIMELOCK_DELAY);
         address existingRegistry = vm.envOr("STOCK_REGISTRY_ADDRESS", address(0));
+        // Factory immutables — must match the chain being deployed to. Mainnet
+        // defaults; pass STABLE_ADDRESS / SWAP_ROUTER_ADDRESS for testnet.
+        address stable = vm.envOr("STABLE_ADDRESS", DEFAULT_STABLE);
+        address swapRouter = vm.envOr("SWAP_ROUTER_ADDRESS", DEFAULT_SWAP_ROUTER);
 
         if (safe == address(0)) {
             console.log("================================================");
@@ -114,7 +119,7 @@ contract DeployStockTreasuryFactory is Script {
         //    with) becomes the factory owner — the only address allowed to
         //    call deployTreasury.
         StockTreasuryFactory factory = new StockTreasuryFactory(
-            STABLE, SWAP_ROUTER, registry, address(beacon), msg.sender
+            stable, swapRouter, registry, address(beacon), msg.sender
         );
 
         vm.stopBroadcast();
