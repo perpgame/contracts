@@ -4,13 +4,12 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {StockTreasury} from "../src/StockTreasury.sol";
 import {AgentCurve} from "../src/AgentCurve.sol";
-import {StockTokenRegistry} from "../src/StockTokenRegistry.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockStockToken} from "./mocks/MockStockToken.sol";
-import {MockAggregator} from "./mocks/MockAggregator.sol";
+import {MockRegistry} from "./mocks/MockRegistry.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockStockTreasuryFactory} from "./mocks/MockStockTreasuryFactory.sol";
 
@@ -18,9 +17,7 @@ contract StockTreasuryTest is Test {
     MockUSDC usdc;
     MockStockToken tokenA; // AAPL
     MockStockToken tokenB; // TSLA
-    MockAggregator feedA;
-    MockAggregator feedB;
-    StockTokenRegistry registry;
+    MockRegistry registry;
     MockSwapRouter router;
     MockStockTreasuryFactory pauseRegistry;
     StockTreasury impl;
@@ -44,20 +41,16 @@ contract StockTreasuryTest is Test {
         usdc = new MockUSDC();
         tokenA = new MockStockToken("Apple Stock", "AAPL");
         tokenB = new MockStockToken("Tesla Stock", "TSLA");
-        // Chainlink-style 8-dec feeds, both marked at $1 so seed numbers stay
-        // simple ($1 → 1e18 tokens per stable dollar).
-        feedA = new MockAggregator(8, 1e8);
-        feedB = new MockAggregator(8, 1e8);
 
-        registry = new StockTokenRegistry(address(this), address(usdc));
-        registry.addToken(address(tokenA), address(feedA), address(0), POOL_FEE, 0);
-        registry.addToken(address(tokenB), address(feedB), address(0), POOL_FEE, 0);
+        // Both tokens marked at $1 (mark = 1e6 stable base per 1e18 token) so
+        // seed numbers stay simple ($1 → 1e18 tokens per stable dollar).
+        registry = new MockRegistry(address(usdc));
+        registry.addToken(address(tokenA), address(0), POOL_FEE, 0);
+        registry.addToken(address(tokenB), address(0), POOL_FEE, 0);
         // Mirror the old $10 venue floor so per-leg sizing expectations hold.
         registry.setMinTradeStable(10e6);
 
-        router = new MockSwapRouter(address(usdc));
-        router.setFeed(address(tokenA), feedA);
-        router.setFeed(address(tokenB), feedB);
+        router = new MockSwapRouter(address(usdc), address(registry));
         // Pre-fund the router so it can pay out either side of a swap.
         usdc.mint(address(router), 1e15);
         tokenA.mint(address(router), 1e30);
@@ -153,13 +146,10 @@ contract StockTreasuryTest is Test {
         m[0] = type(uint256).max;
     }
 
-    /// Create a fresh stock token + $1 feed, register it in the registry and
-    /// wire the router's pricing for it.
+    /// Create a fresh token at a $1 mark, register it and pre-fund the router.
     function _addStock(string memory name_, string memory sym) internal returns (MockStockToken t) {
         t = new MockStockToken(name_, sym);
-        MockAggregator f = new MockAggregator(8, 1e8);
-        registry.addToken(address(t), address(f), address(0), POOL_FEE, 0);
-        router.setFeed(address(t), f);
+        registry.addToken(address(t), address(0), POOL_FEE, 0);
         t.mint(address(router), 1e30);
     }
 
@@ -192,9 +182,7 @@ contract StockTreasuryTest is Test {
     function test_TwoHop_BuyAndSell_EndToEnd() public {
         address weth = address(0xE7A);
         MockStockToken twoHop = new MockStockToken("Two Hop Stock", "HOP");
-        MockAggregator f = new MockAggregator(8, 1e8); // $1 mark, like the others
-        registry.addToken(address(twoHop), address(f), weth, 500, 3000);
-        router.setFeed(address(twoHop), f);
+        registry.addToken(address(twoHop), weth, 500, 3000); // $1 mark, like the others
         twoHop.mint(address(router), 1e30);
 
         // Sanity: the registry really hands out a two-hop path, so the swap
@@ -1255,7 +1243,7 @@ contract StockTreasuryTest is Test {
     // equals the excess — not a balance-proportional guess.
     function test_ExecuteRebalanceStep_SellSizedByRegistryAmountOf() public {
         // A's price doubles: A = 500e18 tokens @ $2 = $1000, B = $500, nav $1500.
-        feedA.setAnswer(2e8);
+        registry.setMark(address(tokenA), 2e6); // $2
         assertEq(treasury.nav(), 1500 * 1e6, "nav reflects the new mark");
 
         // Target 50/50 of $1500 → A target $750 → shrink $250 →
@@ -1328,38 +1316,32 @@ contract StockTreasuryTest is Test {
         assertEq(treasury.nav(), idle + tokenVal);
     }
 
-    // Once a feed goes past maxPriceAge, every valuation-dependent path —
-    // nav(), buys, sells, rebalance steps — reverts StalePrice rather than
-    // trading at a frozen mark.
-    function test_Nav_RevertsOnStaleFeed() public {
-        (, , , uint256 updatedAt,) = feedA.latestRoundData();
-        vm.warp(updatedAt + registry.maxPriceAge() + 1);
+    // When a leg becomes unpriceable (on the real registry: too little TWAP
+    // history; here: a frozen mark), every strict valuation-dependent path —
+    // nav(), buys, rebalance steps — reverts rather than trading at a bad mark.
+    function test_Nav_RevertsOnUnpriceableLeg() public {
+        registry.setFrozen(address(tokenA), true);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(StockTokenRegistry.StalePrice.selector, address(tokenA), updatedAt)
-        );
+        vm.expectRevert(bytes("MockRegistry: stale"));
         treasury.nav();
     }
 
-    function test_Buy_RevertsOnStaleFeed() public {
-        (, , , uint256 updatedAt,) = feedA.latestRoundData();
-        vm.warp(updatedAt + registry.maxPriceAge() + 1);
+    function test_Buy_RevertsOnUnpriceableLeg() public {
+        registry.setFrozen(address(tokenA), true);
 
         vm.startPrank(bob);
         usdc.approve(address(curve), 100 * 1e6);
-        vm.expectRevert(
-            abi.encodeWithSelector(StockTokenRegistry.StalePrice.selector, address(tokenA), updatedAt)
-        );
+        vm.expectRevert(bytes("MockRegistry: stale"));
         curve.buy(100 * 1e6, 0, _emptyMinTokenOuts(), bob, block.timestamp);
         vm.stopPrank();
     }
 
-    // A stale feed must NOT trap sellers (audit HIGH-3). With returnTokens=true
-    // an unpriceable leg is settled in-kind so a holder can always exit, even
-    // while nav()/buy/rebalance stay frozen (see the sibling revert tests).
-    function test_Sell_StaleFeed_SettlesInKind() public {
-        (, , , uint256 updatedAt,) = feedA.latestRoundData();
-        vm.warp(updatedAt + registry.maxPriceAge() + 1);
+    // An unpriceable leg must NOT trap sellers (audit HIGH-3). With
+    // returnTokens=true each leg is settled in-kind so a holder can always exit,
+    // even while nav()/buy/rebalance stay frozen (see the sibling revert tests).
+    function test_Sell_Unpriceable_SettlesInKind() public {
+        registry.setFrozen(address(tokenA), true);
+        registry.setFrozen(address(tokenB), true);
 
         uint256 aliceAgent = curve.balanceOf(alice);
         uint256 aBefore = tokenA.balanceOf(alice);
@@ -1373,15 +1355,12 @@ contract StockTreasuryTest is Test {
         assertGt(tokenB.balanceOf(alice) - bBefore, 0, "TSLA returned in-kind");
     }
 
-    function test_ExecuteRebalanceStep_RevertsOnStaleFeed() public {
-        (, , , uint256 updatedAt,) = feedA.latestRoundData();
-        vm.warp(updatedAt + registry.maxPriceAge() + 1);
+    function test_ExecuteRebalanceStep_RevertsOnUnpriceableLeg() public {
+        registry.setFrozen(address(tokenA), true);
 
         uint256[] memory zeros = _emptyMinTokenOuts();
         vm.prank(rebalancer);
-        vm.expectRevert(
-            abi.encodeWithSelector(StockTokenRegistry.StalePrice.selector, address(tokenA), updatedAt)
-        );
+        vm.expectRevert(bytes("MockRegistry: stale"));
         treasury.executeRebalanceStep(_wide(), zeros, _wide(), zeros);
     }
 }

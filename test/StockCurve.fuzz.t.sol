@@ -4,13 +4,12 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {StockTreasury} from "../src/StockTreasury.sol";
 import {AgentCurve} from "../src/AgentCurve.sol";
-import {StockTokenRegistry} from "../src/StockTokenRegistry.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockStockToken} from "./mocks/MockStockToken.sol";
-import {MockAggregator} from "./mocks/MockAggregator.sol";
+import {MockRegistry} from "./mocks/MockRegistry.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockStockTreasuryFactory} from "./mocks/MockStockTreasuryFactory.sol";
 
@@ -29,9 +28,7 @@ contract StockCurveFuzzTest is Test {
     MockUSDC usdc;
     MockStockToken tokenA;
     MockStockToken tokenB;
-    MockAggregator feedA;
-    MockAggregator feedB;
-    StockTokenRegistry registry;
+    MockRegistry registry;
     MockSwapRouter router;
     MockStockTreasuryFactory feeRegistry;
     StockTreasury treasury;
@@ -51,17 +48,13 @@ contract StockCurveFuzzTest is Test {
         usdc = new MockUSDC();
         tokenA = new MockStockToken("Apple Stock", "AAPL");
         tokenB = new MockStockToken("Tesla Stock", "TSLA");
-        feedA = new MockAggregator(8, 1e8);
-        feedB = new MockAggregator(8, 1e8);
 
-        registry = new StockTokenRegistry(address(this), address(usdc));
-        registry.addToken(address(tokenA), address(feedA), address(0), 3000, 0);
-        registry.addToken(address(tokenB), address(feedB), address(0), 3000, 0);
+        registry = new MockRegistry(address(usdc));
+        registry.addToken(address(tokenA), address(0), 3000, 0);
+        registry.addToken(address(tokenB), address(0), 3000, 0);
         registry.setMinTradeStable(10e6);
 
-        router = new MockSwapRouter(address(usdc));
-        router.setFeed(address(tokenA), feedA);
-        router.setFeed(address(tokenB), feedB);
+        router = new MockSwapRouter(address(usdc), address(registry));
         usdc.mint(address(router), 1e30);
         tokenA.mint(address(router), 1e40);
         tokenB.mint(address(router), 1e40);

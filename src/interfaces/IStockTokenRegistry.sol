@@ -11,5 +11,6 @@ interface IStockTokenRegistry {
     function valueOf(address token, uint256 amount) external view returns (uint256);
     function amountOf(address token, uint256 stableValue) external view returns (uint256);
     function minTradeStable() external view returns (uint256);
-    function maxPriceAge() external view returns (uint256);
+    /// TWAP window (seconds) NAV is priced over.
+    function twapWindow() external view returns (uint32);
 }

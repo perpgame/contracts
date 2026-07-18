@@ -4,24 +4,23 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ISwapRouter02} from "../../src/interfaces/ISwapRouter02.sol";
-import {MockAggregator} from "./MockAggregator.sol";
+import {IStockTokenRegistry} from "../../src/interfaces/IStockTokenRegistry.sol";
 
 /// Uniswap v3 SwapRouter02 stand-in. Converts between the 6-decimal stable and
-/// 18-decimal stock tokens AT THE REGISTERED FEED PRICE, so with `feeBps == 0`
-/// (the default) swaps are exactly value-conserving at the oracle mark and the
-/// nav-conservation tests stay exact. Individual tests set `feeBps` to model
-/// pool fees + impact, `revertAll` to model a dead router, or a per-token
-/// revert to model one dead/paused pool.
+/// 18-decimal tokens AT THE REGISTRY MARK (`valueOf`/`amountOf`), so with
+/// `feeBps == 0` (the default) swaps are exactly value-conserving at the same
+/// mark the treasury values NAV against — the nav-conservation tests stay exact
+/// with a single source of truth. Individual tests set `feeBps` to model pool
+/// fees + impact, `revertAll` to model a dead router, or a per-token revert to
+/// model one dead/paused pool.
 ///
 /// Pays tokenOut from its own balance — tests pre-fund it with stable and
-/// stock tokens. Pulls tokenIn from the caller like the real router.
+/// tokens. Pulls tokenIn from the caller like the real router.
 contract MockSwapRouter is ISwapRouter02 {
     using SafeERC20 for IERC20;
 
     address public immutable STABLE;
-
-    /// Stock token → its price feed (same feed the registry uses).
-    mapping(address => MockAggregator) public feeds;
+    IStockTokenRegistry public registry;
 
     /// Swap fee in bps applied to amountOut. Default 0 → exact conversion.
     uint256 public feeBps;
@@ -29,17 +28,18 @@ contract MockSwapRouter is ISwapRouter02 {
     /// When true every swap reverts — a globally dead router/pool.
     bool public revertAll;
 
-    /// Per-stock-token dead pool flag.
+    /// Per-token dead pool flag.
     mapping(address => bool) public revertToken;
 
-    constructor(address stable_) {
+    constructor(address stable_, address registry_) {
         STABLE = stable_;
+        registry = IStockTokenRegistry(registry_);
     }
 
     // ─── test hooks ─────────────────────────────────────────────────────────
 
-    function setFeed(address token, MockAggregator feed) external {
-        feeds[token] = feed;
+    function setRegistry(address registry_) external {
+        registry = IStockTokenRegistry(registry_);
     }
 
     function setFeeBps(uint256 bps) external {
@@ -63,7 +63,7 @@ contract MockSwapRouter is ISwapRouter02 {
     /// Multi-hop exact-input. Only the endpoints matter to the mock's economic
     /// model: the packed path's first 20 bytes are tokenIn, its last 20 bytes
     /// are tokenOut, and the intermediate hop(s) are priced through as a single
-    /// end-to-end conversion (same feed-priced math as exactInputSingle). The
+    /// end-to-end conversion (same mark-priced math as exactInputSingle). The
     /// interior fee/token bytes don't affect the mock's result.
     function exactInput(ExactInputParams calldata p) external payable returns (uint256 amountOut) {
         address tokenIn = _addressAt(p.path, 0);
@@ -71,8 +71,8 @@ contract MockSwapRouter is ISwapRouter02 {
         amountOut = _swap(tokenIn, tokenOut, p.amountIn, p.amountOutMinimum, p.recipient);
     }
 
-    /// Feed-priced conversion shared by both entrypoints. tokenIn/tokenOut are
-    /// the path endpoints; exactly one of them is STABLE, the other the stock.
+    /// Mark-priced conversion shared by both entrypoints. tokenIn/tokenOut are
+    /// the path endpoints; exactly one of them is STABLE, the other the token.
     function _swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOutMinimum, address recipient)
         internal
         returns (uint256 amountOut)
@@ -80,22 +80,13 @@ contract MockSwapRouter is ISwapRouter02 {
         require(!revertAll, "router dead");
         address stock = tokenIn == STABLE ? tokenOut : tokenIn;
         require(!revertToken[stock], "pool dead");
-        MockAggregator feed = feeds[stock];
-        require(address(feed) != address(0), "no feed");
-
-        (, int256 answer,,,) = feed.latestRoundData();
-        require(answer > 0, "bad price");
-        uint256 price = uint256(answer);
-        // Stock tokens are 18-dec, stable is 6-dec:
-        // divisor taking (tokenAmount × price) down to stable base units.
-        uint256 scale = 10 ** (18 + uint256(feed.decimals()) - 6);
 
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
         if (tokenIn == STABLE) {
-            amountOut = (amountIn * scale) / price; // stable → stock
+            amountOut = registry.amountOf(stock, amountIn); // stable → token
         } else {
-            amountOut = (amountIn * price) / scale; // stock → stable
+            amountOut = registry.valueOf(stock, amountIn); // token → stable
         }
         amountOut -= (amountOut * feeBps) / 10000;
 
