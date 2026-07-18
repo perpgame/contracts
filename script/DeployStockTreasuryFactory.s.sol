@@ -4,8 +4,10 @@ pragma solidity 0.8.28;
 // Deploys the full upgradeable-treasury infra for the gasless server-deploy
 // flow on Robinhood Chain:
 //
-//   1. StockTokenRegistry       — platform allowlist + Chainlink valuation.
+//   1. StockTokenRegistry       — platform allowlist + Uniswap TWAP valuation.
 //                                  Owner = deployer (ops key adds tokens).
+//                                  Defaults: twapWindow 30m, minTwapWindow 10m,
+//                                  minPoolLiquidity 0 (curated universe).
 //   2. AgentTreasury impl       — the logic contract; its own constructor
 //                                  calls _disableInitializers() so the impl
 //                                  storage is permanently inaccessible.
@@ -48,10 +50,14 @@ pragma solidity 0.8.28;
 //     (TREASURY_FACTORY) and Rails (TREASURY_FACTORY_ADDRESS).
 //   - Persist the registry + beacon + timelock addresses too — you'll need
 //     them for token listings and future upgrades.
-//   - Seed the registry: registry.addToken(token, chainlinkFeed, intermediate,
-//     feeIn, feeOut) per stock token (intermediate=0 for a direct stable pool,
-//     else a two-hop route stable->intermediate->token; see
-//     rake robinhood:seed_registry).
+//   - Seed the registry: registry.addToken(token, intermediate, feeIn, feeOut,
+//     poolIn, poolOut) per memecoin (the rake resolves poolIn/poolOut from the
+//     Uniswap factory; see rake robinhood:seed_registry).
+//   - WARM UP the pools' oracles before any buy/rebalance: on-chain NAV uses a
+//     TWAP, so registry.valueOf reverts until each priced pool has >= minTwapWindow
+//     of observation history. Grow cardinality + let observations accrue via
+//     script/WarmStockPools.s.sol. Display pricing (StockPrices → QuoterV2 spot)
+//     works immediately regardless.
 
 import {Script, console} from "forge-std/Script.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -142,8 +148,9 @@ contract DeployStockTreasuryFactory is Script {
         console.log("Next steps:");
         console.log("  1. Persist all 5 addresses; you need registry, beacon +");
         console.log("     timelock for listings and future upgrades.");
-        console.log("  2. Seed the registry with stock tokens + feeds.");
-        console.log("  3. Set STOCK_TREASURY_FACTORY_ADDRESS=<factory> + STOCK_REGISTRY_ADDRESS=<registry> in Rails.");
-        console.log("  4. Update web/src/lib/contracts/addresses.ts.");
+        console.log("  2. Set STOCK_TREASURY_FACTORY_ADDRESS=<factory> + STOCK_REGISTRY_ADDRESS=<registry> in Rails.");
+        console.log("  3. rake robinhood:seed_registry     (resolves pools + addToken per memecoin).");
+        console.log("  4. forge script WarmStockPools      (grow oracle cardinality; wait for TWAP history).");
+        console.log("  5. Update web/src/lib/contracts/addresses.ts if the factory/registry moved.");
     }
 }
