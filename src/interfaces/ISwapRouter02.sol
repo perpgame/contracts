@@ -16,4 +16,16 @@ interface ISwapRouter02 {
     }
 
     function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
+
+    /// Multi-hop exact-input swap. `path` is packed (tokenIn, fee, token, fee,
+    /// …, tokenOut) — Uniswap v3 encoding. Used for routes with no direct
+    /// stable↔token pool (e.g. USDG → WETH → AAPL).
+    struct ExactInputParams {
+        bytes path;
+        address recipient;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+    }
+
+    function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
 }

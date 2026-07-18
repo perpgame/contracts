@@ -49,9 +49,9 @@ contract StockTreasuryTest is Test {
         feedA = new MockAggregator(8, 1e8);
         feedB = new MockAggregator(8, 1e8);
 
-        registry = new StockTokenRegistry(address(this));
-        registry.addToken(address(tokenA), address(feedA), POOL_FEE);
-        registry.addToken(address(tokenB), address(feedB), POOL_FEE);
+        registry = new StockTokenRegistry(address(this), address(usdc));
+        registry.addToken(address(tokenA), address(feedA), address(0), POOL_FEE, 0);
+        registry.addToken(address(tokenB), address(feedB), address(0), POOL_FEE, 0);
         // Mirror the old $10 venue floor so per-leg sizing expectations hold.
         registry.setMinTradeStable(10e6);
 
@@ -158,7 +158,7 @@ contract StockTreasuryTest is Test {
     function _addStock(string memory name_, string memory sym) internal returns (MockStockToken t) {
         t = new MockStockToken(name_, sym);
         MockAggregator f = new MockAggregator(8, 1e8);
-        registry.addToken(address(t), address(f), POOL_FEE);
+        registry.addToken(address(t), address(f), address(0), POOL_FEE, 0);
         router.setFeed(address(t), f);
         t.mint(address(router), 1e30);
     }
@@ -181,6 +181,60 @@ contract StockTreasuryTest is Test {
         // Treasury holds stock tokens worth `SEED` stable across the two legs.
         assertApproxEqAbs(IERC20(address(tokenA)).balanceOf(address(treasury)), 500 * 1e18, 1);
         assertApproxEqAbs(IERC20(address(tokenB)).balanceOf(address(treasury)), 500 * 1e18, 1);
+    }
+
+    // ─── multi-hop routing ─────────────────────────────────────────────────
+
+    /// A stock token with NO direct stable pool routes stable → WETH → token on
+    /// the way in and token → WETH → stable on the way out. A buy (deploy) then
+    /// a full sell (curve exit) must both clear through the packed two-hop path
+    /// and move holdings/NAV exactly as a direct token does at the oracle mark.
+    function test_TwoHop_BuyAndSell_EndToEnd() public {
+        address weth = address(0xE7A);
+        MockStockToken twoHop = new MockStockToken("Two Hop Stock", "HOP");
+        MockAggregator f = new MockAggregator(8, 1e8); // $1 mark, like the others
+        registry.addToken(address(twoHop), address(f), weth, 500, 3000);
+        router.setFeed(address(twoHop), f);
+        twoHop.mint(address(router), 1e30);
+
+        // Sanity: the registry really hands out a two-hop path, so the swap
+        // below is genuinely exercising exactInput's path decode.
+        assertEq(
+            registry.buyPath(address(twoHop)),
+            abi.encodePacked(address(usdc), uint24(500), weth, uint24(3000), address(twoHop)),
+            "buyPath is two-hop"
+        );
+
+        // Fresh single-asset treasury holding only the two-hop token.
+        impl = new StockTreasury();
+        beacon = new UpgradeableBeacon(address(impl), address(this));
+        StockTreasury.CurveInitParams memory ci = StockTreasury.CurveInitParams({
+            name: "Hop",
+            symbol: "HOP",
+            premiumCapSupply: PREMIUM_CAP_SUPPLY,
+            extraPremium: EXTRA_PREMIUM,
+            stableSeed: SEED,
+            seeder: alice,
+            recipient: alice,
+            minTokenOuts: new uint256[](1)
+        });
+        StockTreasury hopTreasury =
+            StockTreasury(_deployProxyWithSeed(_single("HOP", address(twoHop)), "ipfs://hop", ci, alice));
+        AgentCurve hopCurve = AgentCurve(hopTreasury.curve());
+
+        // BUY leg cleared through the two-hop path during deploy.
+        uint256 held = twoHop.balanceOf(address(hopTreasury));
+        assertGt(held, 0, "two-hop buy delivered the token");
+        assertApproxEqAbs(hopTreasury.nav(), SEED, 2, "nav ~= seed at oracle mark");
+
+        // SELL the entire position back through the reverse two-hop path.
+        uint256 aliceAgent = hopCurve.balanceOf(alice);
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        hopCurve.sell(aliceAgent, alice, 0, false, block.timestamp);
+
+        assertGt(usdc.balanceOf(alice), aliceUsdcBefore, "two-hop sell returned stable");
+        assertEq(twoHop.balanceOf(address(hopTreasury)), 0, "position fully unwound");
     }
 
     function test_Construction_AbsorbsPreDonatedStable() public {

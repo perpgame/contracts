@@ -57,8 +57,28 @@ contract MockSwapRouter is ISwapRouter02 {
     // ─── ISwapRouter02 ──────────────────────────────────────────────────────
 
     function exactInputSingle(ExactInputSingleParams calldata p) external payable returns (uint256 amountOut) {
+        amountOut = _swap(p.tokenIn, p.tokenOut, p.amountIn, p.amountOutMinimum, p.recipient);
+    }
+
+    /// Multi-hop exact-input. Only the endpoints matter to the mock's economic
+    /// model: the packed path's first 20 bytes are tokenIn, its last 20 bytes
+    /// are tokenOut, and the intermediate hop(s) are priced through as a single
+    /// end-to-end conversion (same feed-priced math as exactInputSingle). The
+    /// interior fee/token bytes don't affect the mock's result.
+    function exactInput(ExactInputParams calldata p) external payable returns (uint256 amountOut) {
+        address tokenIn = _addressAt(p.path, 0);
+        address tokenOut = _addressAt(p.path, p.path.length - 20);
+        amountOut = _swap(tokenIn, tokenOut, p.amountIn, p.amountOutMinimum, p.recipient);
+    }
+
+    /// Feed-priced conversion shared by both entrypoints. tokenIn/tokenOut are
+    /// the path endpoints; exactly one of them is STABLE, the other the stock.
+    function _swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOutMinimum, address recipient)
+        internal
+        returns (uint256 amountOut)
+    {
         require(!revertAll, "router dead");
-        address stock = p.tokenIn == STABLE ? p.tokenOut : p.tokenIn;
+        address stock = tokenIn == STABLE ? tokenOut : tokenIn;
         require(!revertToken[stock], "pool dead");
         MockAggregator feed = feeds[stock];
         require(address(feed) != address(0), "no feed");
@@ -70,16 +90,26 @@ contract MockSwapRouter is ISwapRouter02 {
         // divisor taking (tokenAmount × price) down to stable base units.
         uint256 scale = 10 ** (18 + uint256(feed.decimals()) - 6);
 
-        IERC20(p.tokenIn).safeTransferFrom(msg.sender, address(this), p.amountIn);
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
-        if (p.tokenIn == STABLE) {
-            amountOut = (p.amountIn * scale) / price; // stable → stock
+        if (tokenIn == STABLE) {
+            amountOut = (amountIn * scale) / price; // stable → stock
         } else {
-            amountOut = (p.amountIn * price) / scale; // stock → stable
+            amountOut = (amountIn * price) / scale; // stock → stable
         }
         amountOut -= (amountOut * feeBps) / 10000;
 
-        require(amountOut >= p.amountOutMinimum, "Too little received");
-        IERC20(p.tokenOut).safeTransfer(p.recipient, amountOut);
+        require(amountOut >= amountOutMinimum, "Too little received");
+        IERC20(tokenOut).safeTransfer(recipient, amountOut);
+    }
+
+    /// Read the 20-byte address at `offset` in a Uniswap v3 packed path.
+    function _addressAt(bytes memory path, uint256 offset) internal pure returns (address addr) {
+        require(path.length >= offset + 20, "bad path");
+        // The word starting at `offset` has the 20 address bytes in its high
+        // bytes; shift right by 12 bytes (96 bits) to right-align them.
+        assembly {
+            addr := shr(96, mload(add(add(path, 0x20), offset)))
+        }
     }
 }

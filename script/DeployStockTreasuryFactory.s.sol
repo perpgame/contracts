@@ -48,8 +48,10 @@ pragma solidity 0.8.28;
 //     (TREASURY_FACTORY) and Rails (TREASURY_FACTORY_ADDRESS).
 //   - Persist the registry + beacon + timelock addresses too — you'll need
 //     them for token listings and future upgrades.
-//   - Seed the registry: registry.addToken(token, chainlinkFeed, poolFee)
-//     per stock token (see rake robinhood:seed_registry).
+//   - Seed the registry: registry.addToken(token, chainlinkFeed, intermediate,
+//     feeIn, feeOut) per stock token (intermediate=0 for a direct stable pool,
+//     else a two-hop route stable->intermediate->token; see
+//     rake robinhood:seed_registry).
 
 import {Script, console} from "forge-std/Script.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -92,7 +94,7 @@ contract DeployStockTreasuryFactory is Script {
         //    tokens; hand to a multisig later via transferOwnership.
         address registry = existingRegistry;
         if (registry == address(0)) {
-            registry = address(new StockTokenRegistry(msg.sender));
+            registry = address(new StockTokenRegistry(msg.sender, stable));
         }
 
         // 2. Impl. Its constructor disables initializers on its own storage.

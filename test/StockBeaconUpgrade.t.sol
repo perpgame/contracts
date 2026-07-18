@@ -66,9 +66,9 @@ contract StockBeaconUpgradeTest is Test {
         feedA = new MockAggregator(8, 1e8);
         feedB = new MockAggregator(8, 1e8);
 
-        registry = new StockTokenRegistry(address(this));
-        registry.addToken(address(tokenA), address(feedA), 3000);
-        registry.addToken(address(tokenB), address(feedB), 3000);
+        registry = new StockTokenRegistry(address(this), address(usdc));
+        registry.addToken(address(tokenA), address(feedA), address(0), 3000, 0);
+        registry.addToken(address(tokenB), address(feedB), address(0), 3000, 0);
         registry.setMinTradeStable(10e6);
 
         router = new MockSwapRouter(address(usdc));

@@ -33,7 +33,7 @@ interface ITreasuryFactory {
 contract StockTreasury is Initializable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    string public constant VERSION = "1.0.0-stock";
+    string public constant VERSION = "1.1.0-stock-multihop";
 
     uint16 private constant BPS_DENOM = 10000;
 
@@ -385,15 +385,12 @@ contract StockTreasury is Initializable, ReentrancyGuard {
             if (tokenOut == 0) continue;
             IERC20(token).forceApprove(address(SWAP_ROUTER), tokenOut);
             // slither-disable-next-line calls-loop,reentrancy-events
-            try SWAP_ROUTER.exactInputSingle(
-                ISwapRouter02.ExactInputSingleParams({
-                    tokenIn: token,
-                    tokenOut: address(STABLE),
-                    fee: REGISTRY.poolFee(token),
+            try SWAP_ROUTER.exactInput(
+                ISwapRouter02.ExactInputParams({
+                    path: REGISTRY.sellPath(token),
                     recipient: address(this),
                     amountIn: tokenOut,
-                    amountOutMinimum: 0,
-                    sqrtPriceLimitX96: 0
+                    amountOutMinimum: 0
                 })
             ) returns (uint256 got) {
                 swapped += got;
@@ -560,20 +557,19 @@ contract StockTreasury is Initializable, ReentrancyGuard {
 
     // ─── Swap plumbing ────────────────────────────────────────────────────
 
+    // Swaps route via the registry's packed Uniswap v3 path (multi-hop where
+    // there's no direct stable↔token pool, e.g. USDG → WETH → AAPL).
     function _swapStableForToken(address token, uint256 stableIn, uint256 minTokenOut)
         internal
         returns (uint256 tokenOut)
     {
         STABLE.forceApprove(address(SWAP_ROUTER), stableIn);
-        tokenOut = SWAP_ROUTER.exactInputSingle(
-            ISwapRouter02.ExactInputSingleParams({
-                tokenIn: address(STABLE),
-                tokenOut: token,
-                fee: REGISTRY.poolFee(token),
+        tokenOut = SWAP_ROUTER.exactInput(
+            ISwapRouter02.ExactInputParams({
+                path: REGISTRY.buyPath(token),
                 recipient: address(this),
                 amountIn: stableIn,
-                amountOutMinimum: minTokenOut,
-                sqrtPriceLimitX96: 0
+                amountOutMinimum: minTokenOut
             })
         );
     }
@@ -583,15 +579,12 @@ contract StockTreasury is Initializable, ReentrancyGuard {
         returns (uint256 stableOut)
     {
         IERC20(token).forceApprove(address(SWAP_ROUTER), tokenIn);
-        stableOut = SWAP_ROUTER.exactInputSingle(
-            ISwapRouter02.ExactInputSingleParams({
-                tokenIn: token,
-                tokenOut: address(STABLE),
-                fee: REGISTRY.poolFee(token),
+        stableOut = SWAP_ROUTER.exactInput(
+            ISwapRouter02.ExactInputParams({
+                path: REGISTRY.sellPath(token),
                 recipient: address(this),
                 amountIn: tokenIn,
-                amountOutMinimum: minStableOut,
-                sqrtPriceLimitX96: 0
+                amountOutMinimum: minStableOut
             })
         );
     }
