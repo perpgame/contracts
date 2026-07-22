@@ -12,6 +12,7 @@ import {IPermit2} from "./interfaces/IPermit2.sol";
 import {AgentCurve} from "./AgentCurve.sol";
 import {V4PoolKey} from "./libraries/V4PoolKey.sol";
 import {V4SwapEncoder} from "./libraries/V4SwapEncoder.sol";
+import {EquityTreasuryExec} from "./libraries/EquityTreasuryExec.sol";
 import {EquityTreasuryValuation, AssetConfig} from "./EquityTreasuryValuation.sol";
 
 interface IEquityTreasuryFactory {
@@ -578,49 +579,35 @@ contract EquityTreasury is Initializable, ReentrancyGuard {
     // PAYOUT — only rebalance weight sizing + floor sizing, where the per-swap
     // realized floor + authorized-only access are the actual safety backstops.
 
+    // Marks + floors + rebalance-NAV live in {EquityTreasuryExec} (delegatecall
+    // library) to keep this contract under the EIP-170 limit; these are thin
+    // forwarders so call sites and behavior are unchanged.
     function _rebalanceNav() internal view returns (uint256 total) {
-        uint256 n = symbols.length;
-        for (uint256 i = 0; i < n; i++) {
-            address token = assets[symbols[i]].token;
-            uint256 bal = IERC20(token).balanceOf(address(this));
-            if (bal > 0) total += _markValue(token, bal);
-        }
-        total += STABLE.balanceOf(address(this));
+        return EquityTreasuryExec.rebalanceNav(symbols, assets, STABLE, REGISTRY);
     }
 
     /// @dev Stable value of `tokenAmt`: Chainlink if fresh, else spot.
     function _markValue(address token, uint256 tokenAmt) internal view returns (uint256) {
-        if (REGISTRY.isFeedFresh(token)) return REGISTRY.valueOf(token, tokenAmt);
-        return REGISTRY.spotValueOf(token, tokenAmt);
+        return EquityTreasuryExec.markValue(REGISTRY, token, tokenAmt);
     }
 
-    /// @dev Token amount worth `stableValue`: Chainlink inverse if fresh, else a
-    /// spot inverse (assumes 18-dec equity tokens — the only class here).
+    /// @dev Token amount worth `stableValue`: Chainlink inverse if fresh, else spot inverse.
     function _markAmount(address token, uint256 stableValue) internal view returns (uint256) {
-        if (REGISTRY.isFeedFresh(token)) return REGISTRY.amountOf(token, stableValue);
-        uint256 unitValue = REGISTRY.spotValueOf(token, 1e18); // USDG per 1e18 token
-        if (unitValue == 0) return 0;
-        return (stableValue * 1e18) / unitValue;
+        return EquityTreasuryExec.markAmount(REGISTRY, token, stableValue);
     }
 
-    /// @dev SELL floor (stable out): max(caller floor, expected × (1 − buffer)),
-    /// buffer wider when priced off spot.
+    /// @dev SELL floor (stable out): max(caller floor, expected × (1 − buffer)).
     function _sellFloor(address token, uint256 expectedStableOut, uint256 callerFloor)
         internal
         view
         returns (uint256)
     {
-        uint16 buffer = REGISTRY.isFeedFresh(token) ? REGISTRY.slipBufferBps() : REGISTRY.slipBufferStaleBps();
-        uint256 bufFloor = (expectedStableOut * (BPS_DENOM - buffer)) / BPS_DENOM;
-        return callerFloor > bufFloor ? callerFloor : bufFloor;
+        return EquityTreasuryExec.sellFloor(REGISTRY, token, expectedStableOut, callerFloor);
     }
 
     /// @dev BUY floor (token out): max(caller floor, expected × (1 − buffer)).
     function _buyFloor(address token, uint256 growStable, uint256 callerFloor) internal view returns (uint256) {
-        uint256 expectedToken = _markAmount(token, growStable);
-        uint16 buffer = REGISTRY.isFeedFresh(token) ? REGISTRY.slipBufferBps() : REGISTRY.slipBufferStaleBps();
-        uint256 bufFloor = (expectedToken * (BPS_DENOM - buffer)) / BPS_DENOM;
-        return callerFloor > bufFloor ? callerFloor : bufFloor;
+        return EquityTreasuryExec.buyFloor(REGISTRY, token, growStable, callerFloor);
     }
 
     function feeRecipient() public view returns (address) {
@@ -703,43 +690,9 @@ contract EquityTreasury is Initializable, ReentrancyGuard {
         internal
         returns (uint256 out)
     {
-        (address tokenIn, address tokenOut) =
-            isBuy ? (address(STABLE), equityToken) : (equityToken, address(STABLE));
-        uint128 amtIn = _u128(amountIn);
-
-        V4PoolKey.PoolKey memory key = REGISTRY.poolKey(equityToken);
-        bool zeroForOne = tokenIn == key.currency0;
-
-        // Permit2 funding: one-time max token→Permit2 ERC-20 allowance, then a
-        // per-swap Permit2→router allowance sized to exactly this input.
-        _ensurePermit2Erc20Allowance(tokenIn, amtIn);
-        IPermit2(PERMIT2).approve(
-            tokenIn, address(ROUTER), amtIn, uint48(block.timestamp) + PERMIT2_EXPIRATION_BUFFER
+        return EquityTreasuryExec.v4ExactInput(
+            REGISTRY, ROUTER, address(STABLE), equityToken, amountIn, minOut, isBuy
         );
-
-        uint256 balBefore = IERC20(tokenOut).balanceOf(address(this));
-
-        (bytes memory commands, bytes[] memory inputs) =
-            V4SwapEncoder.encodeExactInSingle(key, zeroForOne, tokenIn, tokenOut, amtIn, _u128(minOut), 0);
-        // slither-disable-next-line reentrancy-events
-        ROUTER.execute(commands, inputs, block.timestamp);
-
-        out = IERC20(tokenOut).balanceOf(address(this)) - balBefore;
-        if (out < minOut) revert SlippageExceeded();
-    }
-
-    /// @dev Ensure the token grants Permit2 a sufficient ERC-20 allowance. Set
-    /// once to max (Permit2 is the canonical, audited allowance hub) and reused
-    /// across swaps; re-approved only if it ever drops below what's needed.
-    function _ensurePermit2Erc20Allowance(address token, uint256 amountIn) internal {
-        if (IERC20(token).allowance(address(this), PERMIT2) < amountIn) {
-            IERC20(token).forceApprove(PERMIT2, type(uint256).max);
-        }
-    }
-
-    function _u128(uint256 x) internal pure returns (uint128) {
-        if (x > type(uint128).max) revert AmountTooLarge();
-        return uint128(x);
     }
 
     /// Issuer pause probe, tolerant of plain ERC-20s without `paused()`.
