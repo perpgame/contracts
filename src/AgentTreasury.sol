@@ -24,6 +24,7 @@ interface ITreasuryFactory {
     function paused() external view returns (bool);
     function feeRecipient() external view returns (address);
     function feeBps() external view returns (uint16);
+    function creatorFeeShareBps() external view returns (uint16);
     function USDC() external view returns (address);
     function LT_HELPER() external view returns (address);
     function BOUNCE_FACTORY() external view returns (address);
@@ -78,9 +79,17 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     /// Idle USDC from deposits
     uint256 public depositIdleUsdc;
 
+    /// Share of the protocol fee (bps of the fee) paid to CREATOR; the rest goes
+    /// to the platform feeRecipient. Captured from the factory at `initialize`,
+    /// so it is fixed for this token's lifetime and independent of later factory
+    /// retunes. Treasuries deployed before the creator-fee split were never
+    /// initialized with this slot set, so it reads 0 → 100% to the platform,
+    /// preserving their original behavior across the beacon upgrade.
+    uint16 public creatorFeeShareBps;
+
     /// Padding to absorb future variable additions without shifting existing
     /// slots across beacon upgrades. Decrement when appending new storage.
-    uint256[48] private __gap;
+    uint256[47] private __gap;
 
     // AssetConfig lives in TreasuryValuation.sol so the library and this
     // contract share one definition (the storage layout for `assets`).
@@ -193,6 +202,7 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
         USDC = IERC20(f.USDC());
         rebalancer = rebalancer_;
         CREATOR = creator_;
+        creatorFeeShareBps = f.creatorFeeShareBps();
         LT_HELPER = ILeveragedTokenHelper(f.LT_HELPER());
         BOUNCE_FACTORY = IBounceFactory(f.BOUNCE_FACTORY());
 
@@ -362,7 +372,7 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
                 } catch {
                     if (returnLts) {
                         uint256 ltFee = (ltOut * feeBps()) / BPS_DENOM;
-                        if (ltFee > 0) IERC20(address(lt)).safeTransfer(feeRecipient(), ltFee);
+                        _splitFee(IERC20(address(lt)), ltFee);
                         IERC20(address(lt)).safeTransfer(recipient, ltOut - ltFee);
                     }
                 }
@@ -374,7 +384,7 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
 
         if (!returnLts && netOut < minUsdcOut) revert SlippageExceeded();
 
-        if (fee > 0) USDC.safeTransfer(feeRecipient(), fee);
+        _splitFee(USDC, fee);
         if (netOut > 0) USDC.safeTransfer(recipient, netOut);
 
         emit Withdrew(recipient, agentShares, totalShares, netOut, navTotal - notional);
@@ -527,6 +537,18 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
 
     function feeBps() public view returns (uint16) {
         return ITreasuryFactory(TREASURY_FACTORY).feeBps();
+    }
+
+    /// Route a collected fee: the creator's share (of the fee) to CREATOR, the
+    /// remainder to the platform feeRecipient. Works for any fee token (USDC on
+    /// the cash path, an LT on the in-kind path). With creatorFeeShareBps == 0
+    /// (legacy treasuries) the whole fee goes to the platform.
+    function _splitFee(IERC20 token, uint256 fee) internal {
+        if (fee == 0) return;
+        uint256 creatorCut = (fee * creatorFeeShareBps) / BPS_DENOM;
+        if (creatorCut > 0) token.safeTransfer(CREATOR, creatorCut);
+        uint256 platformCut = fee - creatorCut;
+        if (platformCut > 0) token.safeTransfer(feeRecipient(), platformCut);
     }
 
     /// Recover from a pending async redemption that Bounce can no longer settle.

@@ -19,6 +19,7 @@ interface IEquityTreasuryFactory {
     function paused() external view returns (bool);
     function feeRecipient() external view returns (address);
     function feeBps() external view returns (uint16);
+    function creatorFeeShareBps() external view returns (uint16);
     function STABLE() external view returns (address);
     function ROUTER() external view returns (address);
     function REGISTRY() external view returns (address);
@@ -100,9 +101,16 @@ contract EquityTreasury is Initializable, ReentrancyGuard {
     /// Idle stable from deposits
     uint256 public depositIdleStable;
 
+    /// Share of the protocol fee (bps of the fee) paid to CREATOR; the rest goes
+    /// to the platform feeRecipient. Captured from the factory at `initialize`,
+    /// so it is fixed for this token's lifetime. Treasuries deployed before the
+    /// creator-fee split read 0 → 100% to the platform, preserving their original
+    /// behavior across the beacon upgrade.
+    uint16 public creatorFeeShareBps;
+
     /// Padding to absorb future variable additions without shifting existing
     /// slots across beacon upgrades. Decrement when appending new storage.
-    uint256[48] private __gap;
+    uint256[47] private __gap;
 
     struct AssetSpec {
         string symbol;
@@ -219,6 +227,7 @@ contract EquityTreasury is Initializable, ReentrancyGuard {
         STABLE = IERC20(f.STABLE());
         rebalancer = rebalancer_;
         CREATOR = creator_;
+        creatorFeeShareBps = f.creatorFeeShareBps();
         ROUTER = IUniversalRouterForked(f.ROUTER());
         REGISTRY = IEquityRegistry(f.REGISTRY());
 
@@ -383,7 +392,7 @@ contract EquityTreasury is Initializable, ReentrancyGuard {
             if (returnTokens) {
                 anyInKind = true;
                 uint256 tokenFee = (sellAmt * feeBps()) / BPS_DENOM;
-                if (tokenFee > 0) IERC20(token).safeTransfer(feeRecipient(), tokenFee);
+                _splitFee(IERC20(token), tokenFee);
                 IERC20(token).safeTransfer(recipient, sellAmt - tokenFee);
                 emit RedeemLegInKind(symbols[i], token, sellAmt, stale, diverged);
             }
@@ -398,7 +407,7 @@ contract EquityTreasury is Initializable, ReentrancyGuard {
         // then, and the redeemer holds the underlying they can trade themselves.
         if (netOut < minStableOut && !anyInKind) revert SlippageExceeded();
 
-        if (fee > 0) STABLE.safeTransfer(feeRecipient(), fee);
+        _splitFee(STABLE, fee);
         if (netOut > 0) STABLE.safeTransfer(recipient, netOut);
 
         // navAfter is 0: no oracle mark is taken on the redeem path (it may be
@@ -616,6 +625,18 @@ contract EquityTreasury is Initializable, ReentrancyGuard {
 
     function feeBps() public view returns (uint16) {
         return IEquityTreasuryFactory(TREASURY_FACTORY).feeBps();
+    }
+
+    /// Route a collected fee: the creator's share (of the fee) to CREATOR, the
+    /// remainder to the platform feeRecipient. Works for any fee token (STABLE on
+    /// the cash path, an equity token on the in-kind path). With creatorFeeShareBps
+    /// == 0 (legacy treasuries) the whole fee goes to the platform.
+    function _splitFee(IERC20 token, uint256 fee) internal {
+        if (fee == 0) return;
+        uint256 creatorCut = (fee * creatorFeeShareBps) / BPS_DENOM;
+        if (creatorCut > 0) token.safeTransfer(CREATOR, creatorCut);
+        uint256 platformCut = fee - creatorCut;
+        if (platformCut > 0) token.safeTransfer(feeRecipient(), platformCut);
     }
 
     // ─── Swap plumbing (Uniswap v4, forked UniversalRouter + Permit2) ───────

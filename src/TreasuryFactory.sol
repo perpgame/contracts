@@ -21,9 +21,19 @@ contract TreasuryFactory is Ownable2Step, ReentrancyGuard {
     address public feeRecipient;
     uint16 public feeBps;
 
+    /// Share of the protocol fee (in bps of the fee, NOT of the trade) routed to
+    /// a token's creator; the remainder goes to `feeRecipient`. Does not change
+    /// what a trader pays — it only splits the existing commission. Each treasury
+    /// captures this value at launch, so retuning it here affects only tokens
+    /// deployed afterwards.
+    uint16 public creatorFeeShareBps;
+
     uint16 public constant MAX_FEE_BPS = 500;
+    /// Fee split is a fraction of the fee, so it is capped at 100%.
+    uint16 public constant MAX_CREATOR_FEE_SHARE_BPS = 10000;
     address public constant DEFAULT_FEE_RECIPIENT = 0xb2feD3aCf6e30e0f1902A2b190C88C9a0a68eDC3;
     uint16 public constant DEFAULT_FEE_BPS = 100; // 1%
+    uint16 public constant DEFAULT_CREATOR_FEE_SHARE_BPS = 7500; // 75% creator / 25% platform
 
     struct PermitData {
         uint256 value;
@@ -56,6 +66,7 @@ contract TreasuryFactory is Ownable2Step, ReentrancyGuard {
     event PausedSet(bool paused);
     event FeeRecipientSet(address indexed previous, address indexed next);
     event FeeBpsSet(uint16 previous, uint16 next);
+    event CreatorFeeShareBpsSet(uint16 previous, uint16 next);
 
     error InvalidAddress();
     error ZeroSeed();
@@ -63,6 +74,7 @@ contract TreasuryFactory is Ownable2Step, ReentrancyGuard {
     error InsufficientAllowance();
     error AddressMismatch();
     error FeeBpsTooHigh(uint16 given, uint16 max);
+    error CreatorFeeShareTooHigh(uint16 given, uint16 max);
 
     constructor(
         address usdc_,
@@ -83,6 +95,13 @@ contract TreasuryFactory is Ownable2Step, ReentrancyGuard {
         TREASURY_BEACON = treasuryBeacon_;
         feeRecipient = DEFAULT_FEE_RECIPIENT;
         feeBps = DEFAULT_FEE_BPS;
+        creatorFeeShareBps = DEFAULT_CREATOR_FEE_SHARE_BPS;
+    }
+
+    function setCreatorFeeShareBps(uint16 next) external onlyOwner {
+        if (next > MAX_CREATOR_FEE_SHARE_BPS) revert CreatorFeeShareTooHigh(next, MAX_CREATOR_FEE_SHARE_BPS);
+        emit CreatorFeeShareBpsSet(creatorFeeShareBps, next);
+        creatorFeeShareBps = next;
     }
 
     function setFeeRecipient(address next) external onlyOwner {

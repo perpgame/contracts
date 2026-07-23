@@ -311,6 +311,40 @@ contract TreasuryFactoryTest is Test {
         factory.setFeeBps(max + 1);
     }
 
+    function test_SetCreatorFeeShareBps_OwnerOnlyAndCapped() public {
+        assertEq(factory.creatorFeeShareBps(), factory.DEFAULT_CREATOR_FEE_SHARE_BPS(), "defaults to 75%");
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        factory.setCreatorFeeShareBps(5000);
+
+        vm.prank(deployer);
+        factory.setCreatorFeeShareBps(5000);
+        assertEq(factory.creatorFeeShareBps(), 5000, "owner retuned the split");
+
+        // Above 100% of the fee reverts.
+        uint16 max = factory.MAX_CREATOR_FEE_SHARE_BPS();
+        vm.prank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryFactory.CreatorFeeShareTooHigh.selector, max + 1, max));
+        factory.setCreatorFeeShareBps(max + 1);
+    }
+
+    /// A treasury captures the factory's creator share at deploy time and holds
+    /// it for its lifetime, independent of later factory retunes.
+    function test_DeployedTreasury_CapturesCreatorFeeShare() public {
+        TreasuryFactory.DeployParams memory p = _params(bytes32(uint256(77)), serverRebalancer);
+        TreasuryFactory.PermitData memory permit = _signPermit(p.seed, block.timestamp + 30 minutes);
+
+        vm.prank(deployer);
+        (address treasury,) = factory.deployTreasury(p, permit);
+        assertEq(AgentTreasury(treasury).creatorFeeShareBps(), 7500, "locked in the default 75% at launch");
+
+        // Retuning the factory does not touch the already-deployed treasury.
+        vm.prank(deployer);
+        factory.setCreatorFeeShareBps(1000);
+        assertEq(AgentTreasury(treasury).creatorFeeShareBps(), 7500, "existing token's split is immutable");
+    }
+
     function test_ZeroSeed_Reverts() public {
         TreasuryFactory.DeployParams memory p = _params(bytes32(uint256(14)), serverRebalancer);
         p.seed = 0;

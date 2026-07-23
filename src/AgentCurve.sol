@@ -100,7 +100,7 @@ contract AgentCurve is ERC20, ReentrancyGuard {
         if (agentOut < minAgentOut) revert SlippageExceeded();
         if (agentOut == 0) revert ZeroAgentOut();
 
-        if (fee > 0) USDC.safeTransfer(TREASURY.feeRecipient(), fee);
+        _payFee(fee);
 
         USDC.forceApprove(address(TREASURY), netUsdc);
         TREASURY.deployUsdc(netUsdc, minLtOuts);
@@ -127,6 +127,21 @@ contract AgentCurve is ERC20, ReentrancyGuard {
         TREASURY.withdrawLtsTo(recipient, agentIn, supplyBefore, minUsdcOut, returnLts);
 
         emit Sold(msg.sender, recipient, agentIn, totalSupply());
+    }
+
+    /// Split the protocol fee between the token's creator and the platform. The
+    /// creator's share (`creatorFeeShareBps` of the fee — captured on the
+    /// treasury at launch, NOT a fraction of the trade) goes to the treasury's
+    /// CREATOR; the remainder goes to the platform fee recipient. The trader's
+    /// total fee is unchanged. A treasury launched before the creator-fee split
+    /// (or configured with a 0 share) has `creatorFeeShareBps == 0`, so the whole
+    /// fee flows to the platform exactly as before.
+    function _payFee(uint256 fee) private {
+        if (fee == 0) return;
+        uint256 creatorCut = (fee * TREASURY.creatorFeeShareBps()) / BPS_DENOM;
+        if (creatorCut > 0) USDC.safeTransfer(TREASURY.CREATOR(), creatorCut);
+        uint256 platformCut = fee - creatorCut;
+        if (platformCut > 0) USDC.safeTransfer(TREASURY.feeRecipient(), platformCut);
     }
 
     function premium(uint256 supply) public view returns (uint256) {

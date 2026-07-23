@@ -186,6 +186,70 @@ contract EquityTreasuryTest is Test {
         assertGt(usdg.balanceOf(bob) - balBefore, 400 * 1e6, "seller received stable back via v4 sells");
     }
 
+    // ── creator-fee split (25% platform / 75% creator) ──────────────────────
+
+    /// Re-launch with a creator fee share set on the factory so the treasury
+    /// captures it at initialize (default is 0 → the tests above cover the
+    /// legacy 100%-to-platform path). Mirrors setUp's deploy block.
+    function _redeployWithCreatorShare(uint16 shareBps) internal {
+        factory.setCreatorFeeShareBps(shareBps);
+        factory.setFeeBps(100); // base setUp zeroes it; a fee must exist to split
+
+
+        EquityTreasury impl = new EquityTreasury();
+        UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
+
+        EquityTreasury.CurveInitParams memory ci = EquityTreasury.CurveInitParams({
+            name: "Equity Alpha",
+            symbol: "EQA",
+            premiumCapSupply: 30_000 * 1e18,
+            extraPremium: 2e18,
+            stableSeed: 1_000 * 1e6,
+            seeder: alice,
+            recipient: alice,
+            minTokenOuts: new uint256[](2)
+        });
+        bytes memory initData = abi.encodeCall(
+            EquityTreasury.initialize,
+            (rebalancer, creator, address(factory), _portfolio2(5000, 5000), "ipfs://genesis", ci)
+        );
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.prank(alice);
+        usdg.approve(predicted, ci.stableSeed);
+        treasury = EquityTreasury(address(new BeaconProxy(address(beacon), initData)));
+        require(address(treasury) == predicted, "predicted proxy address mismatch");
+        curve = AgentCurve(treasury.curve());
+    }
+
+    function test_Init_CapturesCreatorFeeShareFromFactory() public {
+        _redeployWithCreatorShare(7500);
+        assertEq(treasury.creatorFeeShareBps(), 7500, "share captured at launch");
+    }
+
+    function test_Withdraw_SplitsStableFeeBetweenCreatorAndPlatform() public {
+        _redeployWithCreatorShare(7500);
+        address feeRecipient = factory.feeRecipient();
+
+        // Bob buys then sells via the proven v4 path. Snapshot the recipients
+        // AFTER the buy so the deltas isolate the single sell-fee event — its two
+        // recipient gains are exactly the two cuts of one fee, so the 75% identity
+        // holds regardless of the router's realized amount.
+        vm.startPrank(bob);
+        usdg.approve(address(curve), 500 * 1e6);
+        uint256 shares = curve.buy(500 * 1e6, 0, new uint256[](2), bob, block.timestamp);
+
+        uint256 platBefore = usdg.balanceOf(feeRecipient);
+        uint256 creatorBefore = usdg.balanceOf(creator);
+        curve.sell(shares, bob, 0, false, block.timestamp);
+        vm.stopPrank();
+
+        uint256 creatorGain = usdg.balanceOf(creator) - creatorBefore;
+        uint256 platGain = usdg.balanceOf(feeRecipient) - platBefore;
+        uint256 totalFee = creatorGain + platGain;
+        assertGt(totalFee, 0, "a sell fee was actually collected");
+        assertEq(creatorGain, (totalFee * 7500) / 10000, "creator got exactly 75% of the sell fee");
+    }
+
     // ── Weekend / stale-feed behavior (equity-specific) ─────────────────────
 
     // A stale feed (weekend/after-hours) makes valueOf revert → nav() reverts:

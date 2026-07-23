@@ -10,6 +10,9 @@ contract MockStockTreasuryFactory {
     bool public paused;
     address public feeRecipient = 0xb2feD3aCf6e30e0f1902A2b190C88C9a0a68eDC3;
     uint16 public feeBps = 100; // 1%
+    /// Default 0 = legacy 100%-to-platform behavior. Tests set this to exercise
+    /// the creator/platform split.
+    uint16 public creatorFeeShareBps = 0;
 
     // Sourced by AgentTreasury.initialize, mirroring the real factory immutables.
     address public immutable STABLE;
@@ -32,5 +35,9 @@ contract MockStockTreasuryFactory {
 
     function setFeeBps(uint16 b) external {
         feeBps = b;
+    }
+
+    function setCreatorFeeShareBps(uint16 b) external {
+        creatorFeeShareBps = b;
     }
 }

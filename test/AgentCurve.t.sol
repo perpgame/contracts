@@ -354,6 +354,83 @@ contract AgentCurveTest is Test {
         assertEq(usdc.balanceOf(FEE_RECIPIENT), 2e6, "2% buy fee applied from factory config");
     }
 
+    // ─── creator-fee split (25% platform / 75% creator) ─────────────────────
+
+    /// Re-launch the treasury/curve after setting a creator fee share on the
+    /// factory, so the treasury captures it at initialize (as a real launch
+    /// would). The default share is 0 → the existing tests above exercise the
+    /// legacy 100%-to-platform path.
+    function _redeployWithCreatorShare(uint16 shareBps) internal {
+        feeRegistry.setCreatorFeeShareBps(shareBps);
+        _deployAtomically();
+    }
+
+    function test_Init_CapturesCreatorFeeShareFromFactory() public {
+        _redeployWithCreatorShare(7500);
+        assertEq(treasury.creatorFeeShareBps(), 7500, "share captured at launch");
+    }
+
+    function test_Buy_SplitsFeeBetweenCreatorAndPlatform() public {
+        _redeployWithCreatorShare(7500);
+        uint256 platBefore = usdc.balanceOf(FEE_RECIPIENT);
+        uint256 creatorBefore = usdc.balanceOf(creator);
+
+        vm.startPrank(bob);
+        usdc.approve(address(curve), 100 * 1e6);
+        curve.buy(100 * 1e6, 0, _emptyMinLtOuts(), bob, block.timestamp);
+        vm.stopPrank();
+
+        // 1% of $100 = $1 total fee, unchanged for the trader; creator 75¢, platform 25¢.
+        assertEq(usdc.balanceOf(creator) - creatorBefore, 0.75e6, "creator gets 75% of buy fee");
+        assertEq(usdc.balanceOf(FEE_RECIPIENT) - platBefore, 0.25e6, "platform gets 25% of buy fee");
+    }
+
+    function test_Sell_SplitsFeeBetweenCreatorAndPlatform() public {
+        _redeployWithCreatorShare(7500);
+        uint256 platBefore = usdc.balanceOf(FEE_RECIPIENT);
+        uint256 creatorBefore = usdc.balanceOf(creator);
+        uint256 aliceAgent = curve.balanceOf(alice);
+
+        vm.prank(alice);
+        curve.sell(aliceAgent, alice, 0, true, block.timestamp);
+
+        // 1% of the $1000 NAV = $10 fee → creator $7.5, platform $2.5.
+        uint256 fee = SEED / 100;
+        uint256 creatorCut = (fee * 7500) / 10000;
+        assertEq(usdc.balanceOf(creator) - creatorBefore, creatorCut, "creator gets 75% of sell fee");
+        assertEq(usdc.balanceOf(FEE_RECIPIENT) - platBefore, fee - creatorCut, "platform gets 25% of sell fee");
+    }
+
+    function test_Sell_ReturnLts_SplitsInKindFee() public {
+        _redeployWithCreatorShare(7500);
+        ltB.setRedeemReverts(true); // BTC5L handed out in-kind (net of fee)
+        uint256 aliceAgent = curve.balanceOf(alice);
+        uint256 inKind = ltB.balanceOf(address(treasury));
+
+        vm.prank(alice);
+        curve.sell(aliceAgent, alice, 0, true, block.timestamp);
+
+        uint256 ltFee = inKind / 100; // 1%
+        uint256 creatorCut = (ltFee * 7500) / 10000;
+        assertEq(ltB.balanceOf(creator), creatorCut, "creator gets 75% of in-kind LT fee");
+        assertEq(ltB.balanceOf(FEE_RECIPIENT), ltFee - creatorCut, "platform gets 25% of in-kind LT fee");
+        assertEq(ltB.balanceOf(alice), inKind - ltFee, "seller still nets in-kind minus the full fee");
+    }
+
+    /// With the default 0 share (a pre-split launch), the creator receives
+    /// nothing and the platform keeps the whole fee — no behavior change.
+    function test_Buy_ZeroShare_AllFeeToPlatform() public {
+        uint256 platBefore = usdc.balanceOf(FEE_RECIPIENT);
+
+        vm.startPrank(bob);
+        usdc.approve(address(curve), 100 * 1e6);
+        curve.buy(100 * 1e6, 0, _emptyMinLtOuts(), bob, block.timestamp);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(creator), 0, "creator gets nothing when share is 0");
+        assertEq(usdc.balanceOf(FEE_RECIPIENT) - platBefore, 1e6, "platform keeps the full fee");
+    }
+
     function test_Sell_MinUsdcOutSlippage() public {
         uint256 aliceAgent = curve.balanceOf(alice);
         vm.expectRevert(AgentTreasury.SlippageExceeded.selector);

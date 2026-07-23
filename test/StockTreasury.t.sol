@@ -642,6 +642,49 @@ contract StockTreasuryTest is Test {
         assertEq(tokenB.balanceOf(address(treasury)), 0, "treasury drained of B");
     }
 
+    // ─── creator-fee split (25% platform / 75% creator) ─────────────────────
+
+    /// Re-launch with a creator fee share set on the factory so the treasury
+    /// captures it at initialize (default is 0 → the tests above cover the
+    /// legacy 100%-to-platform path).
+    function _redeployWithCreatorShare(uint16 shareBps) internal {
+        pauseRegistry.setCreatorFeeShareBps(shareBps);
+        _deployAtomically();
+    }
+
+    function test_WithdrawAssetsTo_SplitsStableFeeBetweenCreatorAndPlatform() public {
+        _redeployWithCreatorShare(7500);
+        address feeRecipient = pauseRegistry.feeRecipient();
+        uint256 platBefore = usdc.balanceOf(feeRecipient);
+        uint256 creatorBefore = usdc.balanceOf(creator);
+
+        // Sole holder sells everything; legs swap to stable, so the fee is on
+        // the full realized notional. 1% of $1000 = $10 → creator $7.5, platform $2.5.
+        uint256 aliceAgent = curve.balanceOf(alice);
+        vm.prank(alice);
+        curve.sell(aliceAgent, alice, 0, false, block.timestamp);
+
+        uint256 fee = SEED / 100;
+        uint256 creatorCut = (fee * 7500) / 10000;
+        assertEq(usdc.balanceOf(creator) - creatorBefore, creatorCut, "creator gets 75% of the stable fee");
+        assertEq(usdc.balanceOf(feeRecipient) - platBefore, fee - creatorCut, "platform gets 25% of the stable fee");
+    }
+
+    function test_WithdrawAssetsTo_SplitsInKindFeeBetweenCreatorAndPlatform() public {
+        _redeployWithCreatorShare(7500);
+        router.setRevertAll(true); // force in-kind payout
+        address feeRecipient = pauseRegistry.feeRecipient();
+
+        uint256 aliceAgent = curve.balanceOf(alice);
+        vm.prank(alice);
+        curve.sell(aliceAgent, alice, 0, true, block.timestamp);
+
+        // Each leg is 500e18; 1% fee = 5e18 → creator 3.75e18, platform 1.25e18.
+        assertEq(tokenA.balanceOf(creator), 3.75e18, "creator 75% of A in-kind fee");
+        assertEq(tokenA.balanceOf(feeRecipient), 1.25e18, "platform 25% of A in-kind fee");
+        assertEq(tokenA.balanceOf(alice), 495e18, "seller nets tokens minus the full fee");
+    }
+
     // returnTokens = false: with the router dead the seller wanted stable
     // only, so failing legs are skipped — tokens stay in the treasury and the
     // seller is paid only what swapped (here: nothing).
