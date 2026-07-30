@@ -5,7 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import {IBounceGlobalStorage, IBounceLT} from "./interfaces/IBounceLT.sol";
+import {IBounceLT} from "./interfaces/IBounceLT.sol";
 import {AgentCurve} from "./AgentCurve.sol";
 import {TreasuryValuation, AssetConfig} from "./TreasuryValuation.sol";
 
@@ -87,10 +87,12 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     /// preserving their original behavior across the beacon upgrade.
     uint16 public creatorFeeShareBps;
 
-    enum CreatorFeePolicy { KeepFees, ReinvestInTreasury }
+    // Zero doubles as the default: a treasury whose factory never sets a
+    // policy keeps fees with its creator. Using this sentinel avoids a second
+    // storage flag solely to distinguish the immutable first write.
+    enum CreatorFeePolicy { UnsetKeepFees, KeepFees, ReinvestInTreasury }
 
     CreatorFeePolicy public creatorFeePolicy;
-    bool public creatorFeePolicySet;
 
     /// Padding to absorb future variable additions without shifting existing
     /// slots across beacon upgrades. Decrement when appending new storage.
@@ -239,9 +241,11 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     /// @notice Called once by the deploying factory immediately after launch.
     /// The policy is then immutable for the treasury's lifetime.
     function setCreatorFeePolicy(CreatorFeePolicy next) external {
-        if (msg.sender != TREASURY_FACTORY || creatorFeePolicySet) revert CreatorFeePolicyLocked();
+        if (
+            msg.sender != TREASURY_FACTORY || creatorFeePolicy != CreatorFeePolicy.UnsetKeepFees
+                || next == CreatorFeePolicy.UnsetKeepFees
+        ) revert CreatorFeePolicyLocked();
         creatorFeePolicy = next;
-        creatorFeePolicySet = true;
     }
 
     function deployUsdc(uint256 usdcAmount, uint256[] calldata minLtOuts) external onlyCurve nonReentrant whenNotPaused {
@@ -324,9 +328,7 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     }
 
     function minDeployUsdc() public view returns (uint256) {
-        if (minBps == 0) return type(uint256).max;
-        uint256 minTransactionSize = _minTransactionSize();
-        return (minTransactionSize * BPS_DENOM + uint256(minBps) - 1) / uint256(minBps);
+        return TreasuryValuation.minDeployUsdc(address(BOUNCE_FACTORY), minBps);
     }
 
     // slither-disable-next-line incorrect-equality,calls-loop,reentrancy-events,reentrancy-benign,reentrancy-no-eth
@@ -542,7 +544,7 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     }
 
     function _minTransactionSize() internal view returns (uint256) {
-        return IBounceGlobalStorage(BOUNCE_FACTORY.globalStorage()).minTransactionSize();
+        return TreasuryValuation.minTransactionSize(address(BOUNCE_FACTORY));
     }
 
     function feeRecipient() public view returns (address) {
@@ -743,7 +745,14 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
 
     function quoteWithdrawUsdc(uint256 agentShares, uint256 totalShares) public view returns (uint256) {
         return TreasuryValuation.quoteWithdrawUsdc(
-            symbols, assets, USDC, address(LT_HELPER), agentShares, totalShares, _minTransactionSize(), feeBps()
+            symbols,
+            assets,
+            USDC,
+            address(LT_HELPER),
+            agentShares,
+            totalShares,
+            _minTransactionSize(),
+            feeBps()
         );
     }
 

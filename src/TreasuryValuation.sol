@@ -2,10 +2,14 @@
 pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IBounceLT} from "./interfaces/IBounceLT.sol";
+import {IBounceGlobalStorage, IBounceLT} from "./interfaces/IBounceLT.sol";
 
 interface ILtHelper {
     function getLeveragedTokenBufferAssetValue(address lt) external view returns (int256);
+}
+
+interface IBounceFactoryMinimum {
+    function globalStorage() external view returns (address);
 }
 
 /// Per-symbol asset config. Declared here (not in AgentTreasury) so this
@@ -82,6 +86,17 @@ library TreasuryValuation {
         uint256 buffer = bufferRaw < 0 ? 0 : uint256(bufferRaw);
         return expectedBase * USDC_TO_WAD <= buffer;
     }
+
+    function minTransactionSize(address bounceFactory) public view returns (uint256) {
+        return IBounceGlobalStorage(IBounceFactoryMinimum(bounceFactory).globalStorage()).minTransactionSize();
+    }
+
+    function minDeployUsdc(address bounceFactory, uint16 minBps) public view returns (uint256) {
+        if (minBps == 0) return type(uint256).max;
+        uint256 minTransaction = minTransactionSize(bounceFactory);
+        return (minTransaction * BPS_DENOM + uint256(minBps) - 1) / uint256(minBps);
+    }
+
 
     function quoteWithdrawUsdc(
         string[] storage symbols,
