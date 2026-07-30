@@ -87,6 +87,11 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     /// preserving their original behavior across the beacon upgrade.
     uint16 public creatorFeeShareBps;
 
+    enum CreatorFeePolicy { KeepFees, ReinvestInTreasury }
+
+    CreatorFeePolicy public creatorFeePolicy;
+    bool public creatorFeePolicySet;
+
     /// Padding to absorb future variable additions without shifting existing
     /// slots across beacon upgrades. Decrement when appending new storage.
     uint256[47] private __gap;
@@ -144,6 +149,7 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     error SymbolAlreadyRegistered(string symbol);
     error LengthMismatch();
     error InvalidAddress();
+    error CreatorFeePolicyLocked();
     error NoShares();
     error SlippageExceeded();
     error SymbolTokenMismatch(string symbol, address expected, address actual);
@@ -228,6 +234,14 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
         );
         curve = address(spawned);
         emit CurveSet(address(spawned));
+    }
+
+    /// @notice Called once by the deploying factory immediately after launch.
+    /// The policy is then immutable for the treasury's lifetime.
+    function setCreatorFeePolicy(CreatorFeePolicy next) external {
+        if (msg.sender != TREASURY_FACTORY || creatorFeePolicySet) revert CreatorFeePolicyLocked();
+        creatorFeePolicy = next;
+        creatorFeePolicySet = true;
     }
 
     function deployUsdc(uint256 usdcAmount, uint256[] calldata minLtOuts) external onlyCurve nonReentrant whenNotPaused {
@@ -546,7 +560,12 @@ contract AgentTreasury is Initializable, ReentrancyGuard {
     function _splitFee(IERC20 token, uint256 fee) internal {
         if (fee == 0) return;
         uint256 creatorCut = (fee * creatorFeeShareBps) / BPS_DENOM;
-        if (creatorCut > 0) token.safeTransfer(CREATOR, creatorCut);
+        // Cash fees are already held by this treasury on a sell. Retaining
+        // them directly increases backing without an extra curve trade. In-kind
+        // LT fees remain a creator payout because they cannot be safely and
+        // atomically converted into USDC here.
+        bool reinvestCash = creatorFeePolicy == CreatorFeePolicy.ReinvestInTreasury && address(token) == address(USDC);
+        if (creatorCut > 0 && !reinvestCash) token.safeTransfer(CREATOR, creatorCut);
         uint256 platformCut = fee - creatorCut;
         if (platformCut > 0) token.safeTransfer(feeRecipient(), platformCut);
     }

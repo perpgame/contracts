@@ -158,6 +158,12 @@ contract TreasuryFactory is Ownable2Step, ReentrancyGuard {
         emit TreasuryDeployed(p.user, treasury, curve, saltFull);
     }
 
+    /// @notice Permanently records a newly deployed token's public creator-fee
+    /// policy. The treasury rejects any second write.
+    function setTokenCreatorFeePolicy(address treasury, AgentTreasury.CreatorFeePolicy policy) external onlyOwner {
+        AgentTreasury(treasury).setCreatorFeePolicy(policy);
+    }
+
     function predictTreasury(DeployParams calldata p) external view returns (address) {
         return Create2.computeAddress(_saltFor(p.user, p.salt), keccak256(_proxyInitCode(_initData(p))));
     }
